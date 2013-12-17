@@ -35,12 +35,14 @@ int memstatus = 1;  // value to notify if memory is current or old. 0=old, 1=cur
 
 int ForceFreq = 1;  // Change this to 0 after you upload and run a working sketch to activate the EEPROM memory.  YOU MUST PUT THIS BACK TO 0 AND UPLOAD THE SKETCH AGAIN AFTER STARTING FREQUENCY IS SET!
 
-
+int loopCount = 1;
 
 
 void setup() {
   pinMode(A0,INPUT); // Connect to a button that goes to GND on push
   digitalWrite(A0,HIGH);
+  // initialize the serial communication:
+  Serial.begin(9600);
   lcd.begin(16, 2);
   PCICR |= (1 << PCIE2);
   PCMSK2 |= (1 << PCINT18) | (1 << PCINT19);
@@ -56,16 +58,22 @@ void setup() {
   lcd.print(hertz);
    // Load the stored frequency  
   if (ForceFreq == 0) {
+    Serial.println("Reading EEPROM");
     freq = String(EEPROM.read(0))+String(EEPROM.read(1))+String(EEPROM.read(2))+String(EEPROM.read(3))+String(EEPROM.read(4))+String(EEPROM.read(5))+String(EEPROM.read(6));
     rx = freq.toInt();  
   }
+  Serial.println("VFO Serial Output");
+
 }
 
 
-void loop() {
+void loop() {  // MAIN LOOP  **********************************************************************************
   if (rx != rx2){    
-        showFreq();
+        showFreq(1);
         sendFrequency(rx);
+//        Serial.println("test");
+        loopCount++;
+        if (loopCount>10) loopCount=1;
         rx2 = rx;
       }
       
@@ -75,12 +83,17 @@ void loop() {
     };
 
   // Write the frequency to memory if not stored and 2 seconds have passed since the last frequency change.
-    if(memstatus == 0){   
+  if(memstatus == 0){   
       if(timepassed+2000 < millis()){
         storeMEM();
         }
-      }   
-}
+      }
+      
+  // Check if any serial commands received 
+  if (Serial.available())
+      Serial.write(Serial.read());  //Just echo back at the moment
+  
+}  // END of MAIN LOOP  ****************************************************************************************
 
 
 ISR(PCINT2_vect) {
@@ -133,7 +146,7 @@ void setincrement(){
    delay(250); // Adjust this delay to speed up/slow down the button menu scroll speed.
 };
 
-void showFreq(){
+void showFreq(bool SerialOut){
     millions = int(rx/1000000);
     hundredthousands = ((rx/100000)%10);
     tenthousands = ((rx/10000)%10);
@@ -155,9 +168,28 @@ void showFreq(){
     lcd.print(tens);
     lcd.print(ones);
     lcd.print(" Mhz  ");
+    if (SerialOut) {
+        Serial.print(millions);
+//        Serial.print(".");
+        Serial.print(hundredthousands);
+        Serial.print(tenthousands);
+        Serial.print(thousands);
+//        Serial.print(".");
+        Serial.print(hundreds);
+        Serial.print(tens);
+        Serial.print(ones);
+        Serial.print(",");
+        Serial.println(analogRead(A1));
+//        Serial.print(" Mhz  ");
+    }      
     timepassed = millis();
     memstatus = 0; // Trigger memory write
 };
+void showFreq(){
+  showFreq(0);
+}
+
+
 
 void storeMEM(){
   //Write each frequency section to a EPROM slot.  Yes, it's cheating but it works!
@@ -169,6 +201,8 @@ void storeMEM(){
    EEPROM.write(5,tens);
    EEPROM.write(6,ones);   
    memstatus = 1;  // Let program know memory has been written
+   Serial.println("Freq saved");
+
 };
 
 
