@@ -2,7 +2,7 @@
 Code by David Wilde M0WID
 Original VFO code by Richard Visokey AD7C - www.ad7c.com
 Rotary library also by someone else.
-Revision 1.0 - December 28th, 2013
+Revision 0.02 - December 30th, 2013
 */
 
 // Include the library code
@@ -18,11 +18,11 @@ Revision 1.0 - December 28th, 2013
 #define RESET 10      // Pin 11 - connect to reset pin (RST)
 #define R_BUTTON 4    // Rotary encoder button
 #define L_BUTTON 5    // Left hand button for Menu access
-#define Vin1 A0         // V1 analogue input
-#define Vin3 A1         // V3 analogue input
-#define OpAmpGain 100.0  // Gain of Op amp used for reading the V1/V3 values
+#define Vin1 A0         // V1 analogue input (Ground to mid point of fixed 50R branch)
+#define Vin3 A1         // V3 analogue input (Ground to mid point of branch with antenna - voltage across antenna)
+#define OpAmpGain 12.05  // Gain of Op amp used for reading the V1/V3 values = 47k/3k9
 #define pulseHigh(pin) {digitalWrite(pin, HIGH); digitalWrite(pin, LOW); }
-Rotary r = Rotary(2,3); // sets the pins the rotary encoder uses.  Must be interrupt pins.
+Rotary r = Rotary(3,2); // sets the pins the rotary encoder uses.  Must be interrupt pins.
 
 LiquidCrystal_I2C lcd(0x27, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);
 int_fast32_t rx=7200000; // Starting frequency of VFO
@@ -40,12 +40,12 @@ float ARef = 5.0;
 
 //  Variables for Menu
 bool inMenu=0;      // 1 if in the menus, otherwise 0
-int menuPos=1;      // used so returns to previous menu position when re-entering the menu
+int menuPos=0;      // used so returns to previous menu position when re-entering the menu
 int menuPos2=0;     // used to determine if menu position has changed
 //PROGMEM prog_char menu_00[]="Mode";
 //PROGMEM prog_char menu_01[]="Start Scan";
 //PROGMEM prog_char menu_02[]="End Scan";
-int menuNo=2;  //  max menu entry
+int menuNo=3;  //  max menu entry
 int menuLevel=0, menuLevel2=0;   // determines if encoder moves between menu items(0) or changes value (1)
 int menuVal=0, menuVal2=99, menuMax=9, menuMin=0;
 
@@ -55,10 +55,11 @@ int mode=0;         // 0=SWR/R; 1=V1/V2; 2=Scan
 
 int ForceFreq = 0;  // Change this to 0 after you upload and run a working sketch to activate the EEPROM memory.  YOU MUST PUT THIS BACK TO 0 AND UPLOAD THE SKETCH AGAIN AFTER STARTING FREQUENCY IS SET!
 
-double n=0;            //  used to count intevals between analogue updates
-int ADC1, ADC3;        //  values read from Analog inputs relating to V1 and V3
-float R;              //  calculated resistance of load
-float SWR;              //  calculated SWR of load against 50R
+double n=0;              //  used to count intevals between analogue updates
+int ADC1, ADC3;          //  values read from Analog inputs relating to V1 and V3
+float R;                 //  calculated resistance of load
+float SWR;               //  calculated SWR of load against 50R
+int ZeroAdjust=0;       //  offset to correct for minor errors in op amp gains and different R values - difference between ADC1 and ADC3 with 50R load
 
 void setup() {
   pinMode(R_BUTTON,INPUT); // Connect to a button that goes to GND on push
@@ -96,7 +97,14 @@ void setup() {
   if (ForceFreq == 0) {
     Serial.println("Reading EEPROM");
     freq = String(EEPROM.read(0))+String(EEPROM.read(1))+String(EEPROM.read(2))+String(EEPROM.read(3))+String(EEPROM.read(4))+String(EEPROM.read(5))+String(EEPROM.read(6));
-    rx = freq.toInt();  
+    rx = freq.toInt();
+    // read the saved zero adjust value.  Can be negative!
+    if (EEPROM.read(8)) {    //  value is negative
+      ZeroAdjust=-EEPROM.read(7)  ;
+    }
+    else {    
+      ZeroAdjust=EEPROM.read(7)  ;
+    }
   }
   Serial.println("VFO Serial Output");
 
@@ -119,6 +127,7 @@ void loop() {  // MAIN LOOP  ***************************************************
       if(buttonstate == LOW) {
             if (menuLevel) {
                 menuLevel=0;
+                menuVal=menuPos;
             }
             else {
                 menuLevel=1;
@@ -127,13 +136,18 @@ void loop() {  // MAIN LOOP  ***************************************************
             delay(250);
       };
     
-      if(LbuttonState==LOW) {
-        //  Enter Menu
-        //  Rotary Encoder now changes the menu selection until the encoder button is pressed
-        //  pressing the L_BUTTON again exists the menu
-        //  looping stops while the menu routines are running
+      if(LbuttonState==HIGH) {    // NC button!
+        //  Exit Menu
             inMenu=0;
             showFreq();
+            if (ZeroAdjust>=0) {
+              EEPROM.write(7,ZeroAdjust);    // save the ZeroAdjust value
+              EEPROM.write(8,0);             // save the sign
+            }
+            else {
+              EEPROM.write(7,-ZeroAdjust);
+              EEPROM.write(8,1);
+            }
             delay(250);  // debounce
       }
           
@@ -149,7 +163,7 @@ void loop() {  // MAIN LOOP  ***************************************************
             setincrement();        
       };
     
-      if(LbuttonState==LOW) {
+      if(LbuttonState==HIGH) {      // NC button
         //  Enter Menu
         //  Rotary Encoder now changes the menu selection until the encoder button is pressed
         //  pressing the L_BUTTON again exists the menu
@@ -175,20 +189,17 @@ void loop() {  // MAIN LOOP  ***************************************************
           switch (mode) {
             case 0:
               R=calcR(ADC1, ADC3);
-              SWR=R/50.0;
+              if (R>=50) {SWR=R/50.0;} else {SWR=50.0/R;};
               lcd.print("S=");
+//              if (SWR<1000.00) lcd.print(" ");
+//              if (SWR<100.00) lcd.print(" ");
+              if (SWR<10.00) lcd.print(" ");
+              lcd.print(SWR);
+              lcd.print(" R=");
               if (R<1000.00) lcd.print(" ");
               if (R<100.00) lcd.print(" ");
               if (R<10.00) lcd.print(" ");
-              lcd.print(SWR);
-              if (R<100.00) lcd.print(" ");
-              if (R<10.00) lcd.print(" ");
-              lcd.print(" R=");
-              if (R<100.00) lcd.print(" ");
-              if (R<10.00) lcd.print(" ");
               lcd.print(R);
-              lcd.setCursor(hertzPosition,0);  //  put the cursor back under the frequency digit to be changed
-              lcd.cursor();
               break;
             case 1:
               lcd.print("A1=");
@@ -200,7 +211,9 @@ void loop() {  // MAIN LOOP  ***************************************************
               lcd.print("                ");
               break;
           }
-                   
+          lcd.setCursor(hertzPosition,0);  //  put the cursor back under the frequency digit to be changed
+          lcd.cursor();
+         
           printFreq();
           n=0;
       }
@@ -229,7 +242,7 @@ ISR(PCINT2_vect) {
           menuPos++;
           if (menuPos>menuNo) {menuPos=0;};
         }
-        else {  // editing value
+        else {  // menuLevel==1 - editing value
           if (menuVal<menuMax) menuVal++;
         }
       }
@@ -237,7 +250,7 @@ ISR(PCINT2_vect) {
         if (menuLevel==0) {
           if (menuPos==0) {menuPos=menuNo;} else {menuPos--;};
         }
-        else {  // editing value
+        else {  // menuLevel==1 - editing value
           if (menuVal>menuMin) menuVal--;
         }
       }
@@ -275,29 +288,31 @@ void tfr_byte(byte data)
 
 void setincrement(){
   if(increment == 10){increment = 100; hertz = "100 Hz"; hertzPosition=8;}
-  //else if (increment == 50){increment = 100;  hertz = "100 Hz"; hertzPosition=4;}
   else if (increment == 100){increment = 1000; hertz="1 kHz"; hertzPosition=6;}
-  //else if (increment == 500){increment = 1000; hertz="1 Khz"; hertzPosition=6;}
   else if (increment == 1000){increment = 10000; hertz="10 Khz"; hertzPosition=5;}
-  //else if (increment == 2500){increment = 5000; hertz="5 Khz"; hertzPosition=6;}
-  //else if (increment == 5000){increment = 10000; hertz="10 Khz"; hertzPosition=5;}
   else if (increment == 10000){increment = 100000; hertz="100 Khz"; hertzPosition=4;}
   else if (increment == 100000){increment = 1000000; hertz="1 Mhz"; hertzPosition=2;}  
   else{increment = 10; hertz = "10 Hz"; hertzPosition=9;};  
-//   lcd.setCursor(0,1);
-//   lcd.print("                ");
    lcd.cursor();
    lcd.setCursor(hertzPosition,0); 
-//   lcd.print(hertz); 
    delay(250); // Adjust this delay to speed up/slow down the button menu scroll speed.
 };
 
-void lcdPrintInt(int i, int chars) {
-  //  print with right justify.  Uses min chars space
-    if ((i<10000)&&(chars>4)) lcd.print(" ");
-    if ((i<1000)&&(chars>3)) lcd.print(" ");
-    if ((i<100)&&(chars>2)) lcd.print(" ");
-    if ((i<10)&&(chars>1)) lcd.print(" ");
+void lcdPrintInt(int i, int charNum) {
+  //  print with right justify.  Always uses charNum space on the lcd
+  //  No check to make sure value fits in charNum space
+    if (i>=0) {
+      if ((i<10000)&&(charNum>4)) lcd.print(" ");
+      if ((i<1000)&&(charNum>3)) lcd.print(" ");
+      if ((i<100)&&(charNum>2)) lcd.print(" ");
+      if ((i<10)&&(charNum>1)) lcd.print(" ");
+    }
+    else {  //negative - to keep simple ignore possibility of negative numbers less than -9999
+      if ((i<-1000)&&(charNum>4)) lcd.print(" ");
+      if ((i<-100)&&(charNum>3)) lcd.print(" ");
+      if ((i<10)&&(charNum>2)) lcd.print(" ");
+      if ((i<10)&&(charNum>1)) lcd.print(" ");
+    }
     lcd.print(i);
 }
 
@@ -346,10 +361,12 @@ void printFreq() {
         Serial.print(hundreds);
         Serial.print(tens);
         Serial.print(ones);
-        Serial.print(",");
+        Serial.print(", A0=");
         Serial.print(analogRead(A0));
-        Serial.print(",");
-        Serial.println(analogRead(A1));
+        Serial.print(", A1=");
+        Serial.print(analogRead(A1));
+        Serial.print(", ZeroAdjust=");
+        Serial.println(ZeroAdjust);
 //        Serial.print(" Mhz  ");
 }
 
@@ -367,24 +384,27 @@ float calcR(int ADC1, int ADC3) {
 //  Assume forward voltage drop proportional to measured V (not true)
 //  And just add a value to the ADC reading to compensate
 
-//  float V1, V3;
+float tempR;
+float diff;
   
   //  We have OpAmp gain of 100, resolution 1024, so actual measured voltage after diodes should be ADC*100*Aref/1024
 //  V1=float(ADC1)*100.0*ARef/1024.0
 //  V3=float(ADC3)*100.0*ARef/1024.0
 
-int corrADC1, corrADC3;
+//int corrADC1, corrADC3;
 
-corrADC1=ADC1+0.2*ADC1;
-corrADC3=ADC3+21.0*sqrt(ADC3)-0.5*ADC3;
-
+//corrADC1=ADC1+0.2;
+//corrADC3=ADC3+21.0*sqrt(ADC3)-0.5*ADC3;
   
-  if ((ADC1-ADC3)<5) {
-    return 999.0;
+  if ((ADC1+ADC1-ADC3)<10) {    //  very high resistance or open circuit
+    return 999.9;
   }
   else {
 //    return 50.0/(2.0*V1/(V3+V1)-1.0);
-    return 50.0/(2.0*corrADC1/(corrADC3+corrADC1)-1.0);
+//    return 50.0/(2.0*corrADC1/(corrADC3+corrADC1)-1.0);  //  Calculation if V3 is voltage accross bridge
+    tempR = 50.0*(ADC3)/(ADC1+ADC1-ADC3+ZeroAdjust+ZeroAdjust);    // adjustment is assumed on ADC1 value
+    diff=tempR-50.0;
+    return 50.0+diff*0.8;
   }
 }
 
@@ -399,7 +419,6 @@ void storeMEM(){
    EEPROM.write(6,ones);   
    memstatus = 1;  // Let program know memory has been written
    Serial.println("Freq saved");
-
 }
 
 void showMenu() {
@@ -412,13 +431,13 @@ void showMenu() {
      case 0:
        lcd.print("Mode: ");
        lcd.setCursor(0,1);
-       menuMax=2;       // value limits
+       menuMax=2;       // value limits for mode change
        menuMin=0;
-       if (menuLevel==menuLevel2) {
+       if ((menuLevel==menuLevel2)&&(menuLevel)) {
            mode=menuVal;    //  menuVal is updated with encoder interrupt routine
        }
        else {  // first time into this level
-           if (menuLevel==1) menuVal=mode;
+           if (menuLevel) {menuVal=mode;} else {menuVal=menuPos;};
        }
        lcd.print(mode);
      
@@ -447,6 +466,23 @@ void showMenu() {
        lcd.setCursor(0,1);
        lcd.print("            ");
        break;
+     case 3:
+       lcd.print("Zero:    ");
+       lcd.setCursor(0,1);
+       menuMax=200;       // value limits for Zero Adjustment
+       menuMin=-200;
+       if ((menuLevel==menuLevel2)&&(menuLevel)) {
+           if (ZeroAdjust!=menuVal) {
+             ZeroAdjust=menuVal;    //  menuVal is updated with encoder interrupt routine
+           }
+       }
+       else {  // first time into this level
+           if (menuLevel) {menuVal=ZeroAdjust; Serial.println("Zero First");} else {menuVal=menuPos; Serial.println("Zero Last");};
+       }
+       lcd.print("            ");
+       lcd.setCursor(0,1);
+       lcdPrintInt(ZeroAdjust,4);
+       break;       
      default:
        break;
   } // of switch
@@ -454,6 +490,7 @@ void showMenu() {
   if (menuLevel==0) {
     lcd.setCursor(0,0);
   }
+  
   else {
     lcd.setCursor(0,1);
   }  
