@@ -5,6 +5,9 @@ Standards
 1. First two Characters are command
 2. Commands terminated by carriage return
 
+To Arduino
+======
+
 Set Frequency
 ------
 `F <frequency in Hz>`
@@ -32,3 +35,10 @@ Set Interval
 Start Scan
 ------
 `S`
+
+To PC
+======
+
+Send Data for Freq
+------
+`D <frequency in Hz> <SWR> <Voltage> <Resistance>`
