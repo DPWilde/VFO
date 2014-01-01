@@ -7,28 +7,28 @@ Standards
 
 Set Frequency
 ------
-F <frequency in Hz>
+`F <frequency in Hz>`
 
 Oscillator ON
 ------
-ON
+`ON`
 
 Oscillator OFF
 ------
-OF
+`OF`
 
 Set Start Frequency
 ------
-L <frequency in Hz>
+`L <frequency in Hz>`
 
 Set Stop Frequency
 ------
-H <frequency in Hz>
+`H <frequency in Hz>`
 
 Set Interval
 ------
-I <frequency in Hz>
+`I <frequency in Hz>`
 
 Start Scan
 ------
-S
+`S`
