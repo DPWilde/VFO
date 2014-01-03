@@ -154,9 +154,10 @@ void loop() {  // MAIN LOOP  ***************************************************
   }
   else {    // not in menu
       if (rx != rx2){                    // Frequency has changed
-            showFreq(1);                 //  update frequency on the LCD
+            showFreq(0);                 //  update frequency on the LCD, but not to the serial port
             sendFrequency(rx);           //  Send to DDS (AD9851)
             rx2 = rx;
+            n=0;                         // reset the counter to delay send of data for a time after a change
       }
 
       if(buttonstate == LOW) {
@@ -352,6 +353,7 @@ void showFreq(){
 
 void printFreq() {
 //  millions etc are calculated in show freq, called whenever freq is changed
+        Serial.print("D ");
         Serial.print(millions);
 //        Serial.print(".");
         Serial.print(hundredthousands);
@@ -361,12 +363,12 @@ void printFreq() {
         Serial.print(hundreds);
         Serial.print(tens);
         Serial.print(ones);
-        Serial.print(", A0=");
+        Serial.print(" ");
         Serial.print(analogRead(A0));
-        Serial.print(", A1=");
-        Serial.print(analogRead(A1));
-        Serial.print(", ZeroAdjust=");
-        Serial.println(ZeroAdjust);
+        Serial.print(" ");
+        Serial.println(analogRead(A1));
+        //Serial.print(", ZeroAdjust=");
+        //Serial.println(ZeroAdjust);
 //        Serial.print(" Mhz  ");
 }
 
