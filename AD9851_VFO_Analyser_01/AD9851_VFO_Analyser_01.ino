@@ -12,10 +12,10 @@ Revision 0.02 - December 30th, 2013
 #include <EEPROM.h>
 
 //Setup some items
-#define W_CLK 12      // Pin 8 - connect to AD9851 module word load clock pin (CLK)
-#define FQ_UD 11      // Pin 9 - connect to freq update pin (FQ)
-#define DATA 13       // Pin 10 - connect to serial data load pin (DATA)
-#define RESET 10      // Pin 11 - connect to reset pin (RST)
+#define W_CLK 11      // Pin 8 - connect to AD9851 module word load clock pin (CLK)
+#define FQ_UD 12      // Pin 9 - connect to freq update pin (FQ)
+#define DATA 10       // Pin 10 - connect to serial data load pin (DATA)
+#define RESET 13      // Pin 11 - connect to reset pin (RST)
 #define R_BUTTON 4    // Rotary encoder button
 #define L_BUTTON 5    // Left hand button for Menu access
 #define Vin1 A0         // V1 analogue input (Ground to mid point of fixed 50R branch)
@@ -83,7 +83,7 @@ void setup() {
   lcd.begin(16, 2);            // 1602 LCD display
   PCICR |= (1 << PCIE2);
   PCMSK2 |= (1 << PCINT18) | (1 << PCINT19);
-  sei();
+  sei();                       // Enable interrupts
   pinMode(FQ_UD, OUTPUT);
   pinMode(W_CLK, OUTPUT);
   pinMode(DATA, OUTPUT);
