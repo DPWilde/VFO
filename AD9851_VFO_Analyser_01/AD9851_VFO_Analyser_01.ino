@@ -18,6 +18,7 @@ Revision 0.02 - December 30th, 2013
 #define RESET 13      // Pin 11 - connect to reset pin (RST)
 #define R_BUTTON 4    // Rotary encoder button
 #define L_BUTTON 5    // Left hand button for Menu access
+#define TEST_SWITCH 6 // Turns the DDS output on and off
 #define Vin1 A0         // V1 analogue input (Ground to mid point of fixed 50R branch)
 #define Vin3 A1         // V3 analogue input (Ground to mid point of branch with antenna - voltage across antenna)
 #define OpAmpGain 12.05  // Gain of Op amp used for reading the V1/V3 values = 47k/3k9
@@ -25,12 +26,27 @@ Revision 0.02 - December 30th, 2013
 Rotary r = Rotary(3,2); // sets the pins the rotary encoder uses.  Must be interrupt pins.
 
 LiquidCrystal_I2C lcd(0x27, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);
-int_fast32_t rx=7200000; // Starting frequency of VFO
-int_fast32_t rx2=1; // variable to hold the updated frequency
-int_fast32_t increment = 10; // starting VFO update increment in HZ.
+int_fast32_t rx=7200000;          // Starting frequency of VFO
+int_fast32_t rx2=1;               // variable to hold the updated frequency
+int_fast32_t increment = 10;      // starting VFO update increment in HZ.
+
+int_fast32_t startF=7000000;      // Starting point of freq scan 
+int_fast32_t endF=7200000;        // End point of freq scan
+int_fast32_t scanInc=10000;       // Increments during scan
+int scanSamples=3;                // number of reading to take at each freq during the scan
+int scanSampleCount=0;            // counter for the samples
+
+bool scanning = 0;                // used to record if in scanning state
+bool scanComplete = 0;
+bool serialOn=0;                  // flag used to turn osc on/off via serial port
+bool oscOn=0;                     // used to indicate if oscillator is to be turned on or not
+bool oscOn2=1;                    // previous oscillator state
+
 int buttonstate = 0, LbuttonState = 0;      // state of rotary encoder button and Left Button
+int testSwitchState =0;
+
 String hertz = "10 Hz";
-int  hertzPosition = 9;
+int  hertzPosition = 8;
 byte ones,tens,hundreds,thousands,tenthousands,hundredthousands,millions ;  //Placeholders
 String freq; // string to hold the frequency
 int_fast32_t timepassed = millis(); // int to hold the arduino miilis since startup
@@ -45,7 +61,7 @@ int menuPos2=0;     // used to determine if menu position has changed
 //PROGMEM prog_char menu_00[]="Mode";
 //PROGMEM prog_char menu_01[]="Start Scan";
 //PROGMEM prog_char menu_02[]="End Scan";
-int menuNo=3;  //  max menu entry
+int menuNo=4;  //  max menu entry
 int menuLevel=0, menuLevel2=0;   // determines if encoder moves between menu items(0) or changes value (1)
 int menuVal=0, menuVal2=99, menuMax=9, menuMin=0;
 
@@ -66,6 +82,8 @@ void setup() {
   digitalWrite(R_BUTTON,HIGH);  //  Turn on pull up resistor
   pinMode(L_BUTTON,INPUT); // Connect to a button that goes to GND on push
   digitalWrite(L_BUTTON,HIGH);  //  Turn on pull up resistor
+  pinMode(TEST_SWITCH,INPUT); // Connect to a button or switch that goes to GND on push.  Used to control oscillator
+  digitalWrite(TEST_SWITCH,HIGH);  //  Turn on pull up resistor
   pinMode(Vin1, INPUT);
   digitalWrite(Vin1,LOW);
   pinMode(Vin3, INPUT);
@@ -113,9 +131,31 @@ void setup() {
 
 void loop() {  // MAIN LOOP  **********************************************************************************
 
+  byte commandChar=0;             //  received character
   buttonstate = digitalRead(R_BUTTON);
   LbuttonState = digitalRead(L_BUTTON);
+  testSwitchState = digitalRead(TEST_SWITCH);
+  
+    //  test if the oscillator is to be on or off
+  oscOn=((testSwitchState==LOW)||(scanning)||(serialOn))&&(!inMenu);
+  if ((rx != rx2)||(oscOn!=oscOn2)) {                    // Frequency has changed
+        showDDSFreq();              //  update frequency on the LCD, but not to the serial port
+        if (oscOn) {
+          sendFrequency(rx);           //  Send to DDS (AD9851)
+        }
+        else {
+          sendFrequency(0);
+        }
+        rx2 = rx;
+        oscOn2=oscOn;
+        n=0;                         // reset the counter to delay send of data for a time after a change
+  }
+
   if (inMenu) {
+      // reset scanning flags
+      scanning=0;  
+      scanComplete=0;
+      
       //  display menu text if position has changed
       if ((menuPos!=menuPos2)||(menuVal!=menuVal2)) {
         showMenu();
@@ -129,9 +169,7 @@ void loop() {  // MAIN LOOP  ***************************************************
                 menuLevel=0;
                 menuVal=menuPos;
             }
-            else {
-                menuLevel=1;
-            }
+            else { menuLevel=1;};
             showMenu();
             delay(250);
       };
@@ -139,7 +177,7 @@ void loop() {  // MAIN LOOP  ***************************************************
       if(LbuttonState==HIGH) {    // NC button!
         //  Exit Menu
             inMenu=0;
-            showFreq();
+            showDDSFreq();
             if (ZeroAdjust>=0) {
               EEPROM.write(7,ZeroAdjust);    // save the ZeroAdjust value
               EEPROM.write(8,0);             // save the sign
@@ -153,13 +191,6 @@ void loop() {  // MAIN LOOP  ***************************************************
           
   }
   else {    // not in menu
-      if (rx != rx2){                    // Frequency has changed
-            showFreq(0);                 //  update frequency on the LCD, but not to the serial port
-            sendFrequency(rx);           //  Send to DDS (AD9851)
-            rx2 = rx;
-            n=0;                         // reset the counter to delay send of data for a time after a change
-      }
-
       if(buttonstate == LOW) {
             setincrement();        
       };
@@ -176,37 +207,29 @@ void loop() {  // MAIN LOOP  ***************************************************
       }
         // Write the frequency to memory if not stored and 2 seconds have passed since the last frequency change.
       if(memstatus == 0){   
-          if(timepassed+2000 < millis()){
-            storeMEM();
-          }
+          if ((timepassed+2000 < millis())&&(!scanning)) storeMEM();
       }
 
       // write the V1 and V2 values to LCD, but only every 100 scans and only if not in the menus
-      if (n>30000) {
+      if (n>20000) {
           ADC1 = analogRead(Vin1);
           ADC3 = analogRead(Vin3);
           lcd.setCursor(0,1);
           lcd.noCursor();
           switch (mode) {
-            case 0:
-              R=calcR(ADC1, ADC3);
-              if (R>=50) {SWR=R/50.0;} else {SWR=50.0/R;};
-              lcd.print("S=");
-//              if (SWR<1000.00) lcd.print(" ");
-//              if (SWR<100.00) lcd.print(" ");
-              if (SWR<10.00) lcd.print(" ");
-              lcd.print(SWR);
-              lcd.print(" R=");
-              if (R<1000.00) lcd.print(" ");
-              if (R<100.00) lcd.print(" ");
-              if (R<10.00) lcd.print(" ");
-              lcd.print(R);
+            case 0:  // Show SWR and R
+              showSWR();
               break;
-            case 1:
-              lcd.print("A1=");
+            case 1:  //Show ADC values
+              lcd.print("1=");
               lcdPrintInt(ADC1,4);
-              lcd.print(" A3=");
+              lcd.print(" 3=");
               lcdPrintInt(ADC3,4);
+              break;
+            case 2:  // Show Scan progress as well as SWR and R
+              showSWR();
+              lcd.setCursor(0,0);
+              lcdPrintInt(scanSampleCount,2);
               break;
             default:
               lcd.print("                ");
@@ -215,8 +238,24 @@ void loop() {  // MAIN LOOP  ***************************************************
           lcd.setCursor(hertzPosition,0);  //  put the cursor back under the frequency digit to be changed
           lcd.cursor();
          
-          printFreq();
+          if (oscOn) printFreq();
           n=0;
+          
+          if (scanning) {
+            scanSampleCount++;
+            lcd.setCursor(15,0);
+            lcd.print(scanSampleCount);    //  display progress
+            //  increment frequency by scanInc every scanSamples
+            if (scanSampleCount > scanSamples) {
+              rx=rx+scanInc;
+              scanSampleCount=0;
+              if (rx>=endF) {    // reached end of scan
+                  scanComplete=1;
+                  Serial.println("SS");
+                  scanning=0;
+              }
+            }
+          }
       }
       else {
           n++;
@@ -226,9 +265,44 @@ void loop() {  // MAIN LOOP  ***************************************************
 
 
   // Check if any serial commands received 
-  if (Serial.available())
-      Serial.write(Serial.read());  //Just echo back at the moment
-      
+  if (Serial.available()>0) {
+    //    Serial.write(Serial.read());  
+    // read the char
+    commandChar = Serial.read();
+    switch(commandChar) {
+      case 'L':
+          startF=Serial.parseFloat();
+          break;
+      case 'H':
+          endF=Serial.parseFloat();
+          break;
+      case 'I':
+          scanInc=Serial.parseFloat();
+          break;
+      case 'Y':
+          if (!inMenu) serialOn=1;    //  Turn oscillator on, but only if not in the menus
+          break;
+      case 'N':
+          serialOn=0;    // Turn oscillator off
+          scanning=0;
+          scanSampleCount=0;
+          break;
+      case 'S':
+          if (!inMenu) {
+            scanning=1;    // start scan, but only if not in the menus
+            rx=startF;
+          }
+          break;
+      case 'X':
+          scanning=0;    // finish scan
+          scanSampleCount=0;
+          break;
+      default:
+          Serial.println("serial default");
+          break;
+    }
+  }     
+            
   
   
 }  // END of MAIN LOOP  ****************************************************************************************
@@ -275,9 +349,11 @@ void sendFrequency(double frequency) {
     tfr_byte(freq & 0xFF);
   }
 //  tfr_byte(0x000);   // Final control byte, all 0 for 9850 chip
-  tfr_byte(0x001);   // Final control byte, all 0 except W32(enable 6x) for 9851 chip
-  pulseHigh(FQ_UD);  // Done!  Should see output
+  tfr_byte(0x001);   // Final control byte, keep 6x set
+  pulseHigh(FQ_UD);  // Done!  Should see output if not in standby
 }
+
+
 // transfers a byte, a bit at a time, LSB first to the 9850 via serial DATA line
 void tfr_byte(byte data)
 {
@@ -288,12 +364,12 @@ void tfr_byte(byte data)
 }
 
 void setincrement(){
-  if(increment == 10){increment = 100; hertz = "100 Hz"; hertzPosition=8;}
-  else if (increment == 100){increment = 1000; hertz="1 kHz"; hertzPosition=6;}
-  else if (increment == 1000){increment = 10000; hertz="10 Khz"; hertzPosition=5;}
-  else if (increment == 10000){increment = 100000; hertz="100 Khz"; hertzPosition=4;}
-  else if (increment == 100000){increment = 1000000; hertz="1 Mhz"; hertzPosition=2;}  
-  else{increment = 10; hertz = "10 Hz"; hertzPosition=9;};  
+  if(increment == 10){increment = 100; hertz = "100 Hz"; hertzPosition=7;}
+  else if (increment == 100){increment = 1000; hertz="1 kHz"; hertzPosition=5;}
+  else if (increment == 1000){increment = 10000; hertz="10 Khz"; hertzPosition=4;}
+  else if (increment == 10000){increment = 100000; hertz="100 Khz"; hertzPosition=3;}
+  else if (increment == 100000){increment = 1000000; hertz="1 Mhz"; hertzPosition=1;}  
+  else{increment = 10; hertz = "10 Hz"; hertzPosition=8;};  
    lcd.cursor();
    lcd.setCursor(hertzPosition,0); 
    delay(250); // Adjust this delay to speed up/slow down the button menu scroll speed.
@@ -317,7 +393,20 @@ void lcdPrintInt(int i, int charNum) {
     lcd.print(i);
 }
 
-void showFreq(bool SerialOut){
+void showSWR() {
+    R=calcR(ADC1, ADC3);
+    if (R>=50) {SWR=R/50.0;} else {SWR=50.0/R;};
+    lcd.print("S=");
+    if (SWR<10.00) lcd.print(" ");
+    lcd.print(SWR,2);
+    lcd.print(" R=");
+    if (R<1000.00) lcd.print(" ");
+    if (R<100.00) lcd.print(" ");
+    if (R<10.00) lcd.print(" ");
+    lcd.print(R);
+}
+
+void showDDSFreq(bool SerialOut){
     millions = int(rx/1000000);
     hundredthousands = ((rx/100000)%10);
     tenthousands = ((rx/10000)%10);
@@ -326,30 +415,53 @@ void showFreq(bool SerialOut){
     tens = ((rx/10)%10);
     ones = ((rx/1)%10);
     lcd.setCursor(0,0);
-    lcd.print("                ");
-   if (millions > 9){lcd.setCursor(1,0);}
-   else{lcd.setCursor(2,0);}
+   if (millions > 9){lcd.setCursor(0,0);}
+   else{lcd.print(" ");}
     lcd.print(millions);
-    lcd.print(".");
+    lcd.print(",");
     lcd.print(hundredthousands);
     lcd.print(tenthousands);
     lcd.print(thousands);
-    lcd.print(".");
+    lcd.print(",");
     lcd.print(hundreds);
     lcd.print(tens);
     lcd.print(ones);
-    lcd.print(" Mhz  ");
-    lcd.cursor();    // turn underline cursor on
+    lcd.print("hz  ");
+    if (oscOn) {
+        if(scanning) {lcd.print("S");} else {lcd.print(" I");}
+    }
+    else {lcd.print(" O");};
     lcd.setCursor(hertzPosition,0); //  position cursor under digit to be changed
+    lcd.cursor();    // turn underline cursor on
  
     if (SerialOut) printFreq();      
     timepassed = millis();
     memstatus = 0; // Trigger memory write
 };
-void showFreq(){
+
+void showDDSFreq(){
   //  overload allowing for optional paramater serial out.  If omitted then don't sent to serial port.
-  showFreq(0);
+  showDDSFreq(0);
 }
+
+
+
+void showFreq(int lcdCol, int lcdRow, int_fast32_t f){
+    //  This displays a frequency value at the desired cursor position  
+    
+    lcd.setCursor(lcdCol,lcdRow);
+    if (f<10000000) lcd.print(" ");
+    lcd.print(int(f/1000000));
+    lcd.print(".");
+    lcd.print((f/100000)%10);
+    lcd.print((f/10000)%10);
+    lcd.print((f/1000)%10);
+    lcd.print(".");
+    lcd.print((f/100)%10);
+    lcd.print((f/10)%10);
+    lcd.print((f/1)%10);
+ };
+
 
 void printFreq() {
 //  millions etc are calculated in show freq, called whenever freq is changed
@@ -460,15 +572,17 @@ void showMenu() {
        break;
      case 1:
        lcd.print("Start Freq:");  
-       lcd.setCursor(0,1);
-       lcd.print("            ");
+       showFreq(0,1,startF);
        break;
      case 2:
        lcd.print("End Freq:");  
-       lcd.setCursor(0,1);
-       lcd.print("            ");
+       showFreq(0,1,endF);
        break;
      case 3:
+       lcd.print("Scan increment:");  
+       showFreq(0,1,scanInc);
+       break;
+     case 4:
        lcd.print("Zero:    ");
        lcd.setCursor(0,1);
        menuMax=200;       // value limits for Zero Adjustment
