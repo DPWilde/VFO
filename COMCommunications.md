@@ -2,8 +2,9 @@ Standard of COM Communications
 ======
 Standards
 ------
-1. First two Characters are command
+1. First Character is command
 2. Commands terminated by carriage return
+3. Commands and arguments are seperated by spaces
 
 To Arduino
 ======
@@ -14,11 +15,11 @@ Set Frequency
 
 Oscillator ON
 ------
-`ON`
+`Y`
 
 Oscillator OFF
 ------
-`OF`
+`N`
 
 Set Start Frequency
 ------
@@ -38,15 +39,15 @@ Start Scan
 
 Stop Scan
 ------
-`SS`
+`X`
 
 Return Presets
 ------
-`PR`
+`P`
 
 Send Custom Preset
 ------
-`SP<name> <start frequency in Hz> <stop frequency in Hz>`
+`C <name> <start frequency in Hz> <stop frequency in Hz>`
 
 To PC
 ======
@@ -57,7 +58,7 @@ Send Data for Freq
 
 Return Preset
 ------
-`PR<index> <name> <start frequency in Hz> <stop frequency in Hz>`
+`P <index> <name> <start frequency in Hz> <stop frequency in Hz>`
 
 Examples
 ======
@@ -74,18 +75,18 @@ PC:`S`
 
 When scan finished:
 
-Anylyser:`SS`
+Anylyser:`X`
 
 Get Presets
 ------
-PC:`PR`
+PC:`P`
 
-Anylyser:`PR0 80m 3500000 3800000`
+Anylyser:`P 0 80m 3500000 3800000`
 
 etc. For all presets
 
 Send Custom Preset
 -------
-PC:`SP60m 5258500 5406500`
+PC:`C 60m 5258500 5406500`
 
-Anylyser:`PR12 60m 5258500 5406500`
+Anylyser:`P 12 60m 5258500 5406500`
