@@ -17,7 +17,7 @@ Oscillator ON
 ------
 `Y`
 
-Oscillator OFF
+Oscillator OFF/Stop Scan
 ------
 `N`
 
@@ -37,9 +37,6 @@ Start Scan
 ------
 `S`
 
-Stop Scan
-------
-`X`
 
 Return Presets
 ------
@@ -59,6 +56,10 @@ Send Data for Freq
 Return Preset
 ------
 `P <index> <name> <start frequency in Hz> <stop frequency in Hz>`
+
+Scan Ended
+------
+`X`
 
 Examples
 ======
