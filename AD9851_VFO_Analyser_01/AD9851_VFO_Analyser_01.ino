@@ -12,6 +12,8 @@ Revision 0.02 - December 30th, 2013
 #include <EEPROM.h>
 
 //Setup some items
+//#define DDS 9850
+#define DDS 9851
 #define W_CLK 11      // Pin 8 - connect to AD9851 module word load clock pin (CLK)
 #define FQ_UD 12      // Pin 9 - connect to freq update pin (FQ)
 #define DATA 10       // Pin 10 - connect to serial data load pin (DATA)
@@ -21,8 +23,10 @@ Revision 0.02 - December 30th, 2013
 #define TEST_SWITCH 6 // Turns the DDS output on and off
 #define Vin1 A0         // V1 analogue input (Ground to mid point of fixed 50R branch)
 #define Vin3 A1         // V3 analogue input (Ground to mid point of branch with antenna - voltage across antenna)
-#define OpAmpGain 12.05  // Gain of Op amp used for reading the V1/V3 values = 47k/3k9
+#define OpAmpGain 10  // Gain of Op amp used for reading the V1/V3 values = 100k/10k
 #define pulseHigh(pin) {digitalWrite(pin, HIGH); digitalWrite(pin, LOW); }
+#define F_MAX 30000000  // Max frequency limit
+#define F_MIN 1000000   // Min Frequency limit
 Rotary r = Rotary(3,2); // sets the pins the rotary encoder uses.  Must be interrupt pins.
 
 LiquidCrystal_I2C lcd(0x27, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);
@@ -51,8 +55,8 @@ byte ones,tens,hundreds,thousands,tenthousands,hundredthousands,millions ;  //Pl
 String freq; // string to hold the frequency
 int_fast32_t timepassed = millis(); // int to hold the arduino miilis since startup
 int memstatus = 1;  // value to notify if memory is current or old. 0=old, 1=current.
-float ARef = 5.0;
-// float ARef = 1.1;
+//float ARef = 5.0;
+ float ARef = 1.1;
 
 //  Variables for Menu
 bool inMenu=0;      // 1 if in the menus, otherwise 0
@@ -87,6 +91,7 @@ void setup() {
   pinMode(Vin1, INPUT);
   digitalWrite(Vin1,LOW);
   pinMode(Vin3, INPUT);
+  
   digitalWrite(Vin3,LOW);
   // initialize the serial communication:
   Serial.begin(9600);
@@ -139,6 +144,8 @@ void loop() {  // MAIN LOOP  ***************************************************
     //  test if the oscillator is to be on or off
   oscOn=((testSwitchState==LOW)||(scanning)||(serialOn))&&(!inMenu);
   if ((rx != rx2)||(oscOn!=oscOn2)) {                    // Frequency has changed
+        // make sure it is in limits
+        rx=checkFreq(rx);            // check in bounds
         showDDSFreq();              //  update frequency on the LCD, but not to the serial port
         if (oscOn) {
           sendFrequency(rx);           //  Send to DDS (AD9851)
@@ -155,6 +162,7 @@ void loop() {  // MAIN LOOP  ***************************************************
       // reset scanning flags
       scanning=0;  
       scanComplete=0;
+      serialOn=0;
       
       //  display menu text if position has changed
       if ((menuPos!=menuPos2)||(menuVal!=menuVal2)) {
@@ -249,7 +257,7 @@ void loop() {  // MAIN LOOP  ***************************************************
             if (scanSampleCount > scanSamples) {
               rx=rx+scanInc;
               scanSampleCount=0;
-              if (rx>=endF) {    // reached end of scan
+              if (rx>endF) {    // reached end of scan
                   scanComplete=1;
                   Serial.println("SS");
                   scanning=0;
@@ -270,6 +278,9 @@ void loop() {  // MAIN LOOP  ***************************************************
     // read the char
     commandChar = Serial.read();
     switch(commandChar) {
+      case 'F':
+          rx=Serial.parseFloat();
+          break;
       case 'L':
           startF=Serial.parseFloat();
           break;
@@ -278,6 +289,9 @@ void loop() {  // MAIN LOOP  ***************************************************
           break;
       case 'I':
           scanInc=Serial.parseFloat();
+          break;
+      case 'O':    // Letter O
+          ZeroAdjust=Serial.parseFloat();
           break;
       case 'Y':
           if (!inMenu) serialOn=1;    //  Turn oscillator on, but only if not in the menus
@@ -333,28 +347,41 @@ ISR(PCINT2_vect) {
     else {
       if (result == DIR_CW){rx=rx+increment;}
       else {rx=rx-increment;};       
-        if (rx >=30000000){rx=rx2;}; // UPPER VFO LIMIT
-        if (rx <=1000000){rx=rx2;}; // LOWER VFO LIMIT
+      rx=checkFreq(rx);
+//        if (rx >F_MAX){rx=rx2;}; // UPPER VFO LIMIT
+//        if (rx <F_MIN){rx=rx2;}; // LOWER VFO LIMIT
     }
   }
 }
 
+int_fast32_t checkFreq(int_fast32_t f) {
+  // if out of bounds then revert to previous frequency value
+  if (f >F_MAX){f=rx2;}; // UPPER VFO LIMIT
+  if (f <F_MIN){f=rx2;}; // LOWER VFO LIMIT
+  return f;
+}
 
 
 // frequency calc from datasheet page 8 = <sys clock> * <frequency tuning word>/2^32
-void sendFrequency(double frequency) {  
-  //int32_t freq = frequency * 4294967295/125000000;  // note 125 MHz clock on 9850.  You can make 'slight' tuning variations here by adjusting the clock frequency.
+void sendFrequency(double frequency) {
+#if DDS==9850  
+  int32_t freq = frequency * 4294967295/125000000;  // note 125 MHz clock on 9850.  You can make 'slight' tuning variations here by adjusting the clock frequency.
+#else
   int32_t freq = frequency * 4294967295/180000000;  // note 180 MHz clock on 9851.  You can make 'slight' tuning variations here by adjusting the clock frequency.
+#endif
   for (int b=0; b<4; b++, freq>>=8) {
     tfr_byte(freq & 0xFF);
   }
-//  tfr_byte(0x000);   // Final control byte, all 0 for 9850 chip
-  tfr_byte(0x001);   // Final control byte, keep 6x set
+#if DDS==9850
+  tfr_byte(0x000);   // Final control byte, all 0 for 9850 chip
+#else
+  tfr_byte(0x001);   // Final control byte, keep 6x set for 9851 chip
+#endif
   pulseHigh(FQ_UD);  // Done!  Should see output if not in standby
 }
 
 
-// transfers a byte, a bit at a time, LSB first to the 9850 via serial DATA line
+// transfers a byte, a bit at a time, LSB first to the 9850/1 via serial DATA line
 void tfr_byte(byte data)
 {
   for (int i=0; i<8; i++, data>>=1) {
@@ -493,7 +520,7 @@ float calcR(int ADC1, int ADC3) {
 //  For the moment ignore the forward voltage drop on the diodes, but the germanium diodes are non-linear in this region
 //  and the value should be corrected
 //
-//  Formula Rx = 50/(2V1/(V3+V1)-1)
+//  Formula Rx = 50/(V1/(V3+V1/2)-1)
 //  First calculate the voltages
 //  Assume forward voltage drop proportional to measured V (not true)
 //  And just add a value to the ADC reading to compensate
@@ -505,20 +532,25 @@ float diff;
 //  V1=float(ADC1)*100.0*ARef/1024.0
 //  V3=float(ADC3)*100.0*ARef/1024.0
 
-//int corrADC1, corrADC3;
+float corrADC3;
+int ZA;
+
+corrADC3=16.29+0.1605*ADC3;
+ZA=corrADC3;
 
 //corrADC1=ADC1+0.2;
 //corrADC3=ADC3+21.0*sqrt(ADC3)-0.5*ADC3;
   
-  if ((ADC1+ADC1-ADC3)<10) {    //  very high resistance or open circuit
+  if ((ADC1-ADC3-ZA)<10) {    //  very high resistance or open circuit
     return 999.9;
   }
   else {
 //    return 50.0/(2.0*V1/(V3+V1)-1.0);
 //    return 50.0/(2.0*corrADC1/(corrADC3+corrADC1)-1.0);  //  Calculation if V3 is voltage accross bridge
-    tempR = 50.0*(ADC3)/(ADC1+ADC1-ADC3+ZeroAdjust+ZeroAdjust);    // adjustment is assumed on ADC1 value
-    diff=tempR-50.0;
-    return 50.0+diff*0.8;
+//    tempR = 50.0*(ADC3+ZA)/(ADC1-ADC3-ZA);    // adjustment is assumed on ADC3 value
+    tempR = 50.0*(ADC3+ZeroAdjust)/(ADC1-ADC3-ZeroAdjust);    // adjustment is assumed on ADC3 value
+//    diff=tempR-50.0;
+    return tempR;
   }
 }
 
