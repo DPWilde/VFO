@@ -12,8 +12,8 @@ Revision 0.02 - December 30th, 2013
 #include <EEPROM.h>
 
 //Setup some items
-//#define DDS 9850
-#define DDS 9851
+#define DDS 9850
+//#define DDS 9851
 #define W_CLK 11      // Pin 8 - connect to AD9851 module word load clock pin (CLK)
 #define FQ_UD 12      // Pin 9 - connect to freq update pin (FQ)
 #define DATA 10       // Pin 10 - connect to serial data load pin (DATA)
@@ -422,7 +422,7 @@ void lcdPrintInt(int i, int charNum) {
 
 void showSWR() {
     R=calcR(ADC1, ADC3);
-    if (R>=50) {SWR=R/50.0;} else {SWR=50.0/R;};
+    if (R>=50.0) {SWR=R/50.0;} else {SWR=50.0/R;};
     lcd.print("S=");
     if (SWR<10.00) lcd.print(" ");
     lcd.print(SWR,2);
@@ -503,9 +503,9 @@ void printFreq() {
         Serial.print(tens);
         Serial.print(ones);
         Serial.print(" ");
-        Serial.print(analogRead(A0));
+        Serial.print(ADC1);
         Serial.print(" ");
-        Serial.println(analogRead(A1));
+        Serial.println(ADC3+ZeroAdjust);
         //Serial.print(", ZeroAdjust=");
         //Serial.println(ZeroAdjust);
 //        Serial.print(" Mhz  ");
@@ -548,7 +548,8 @@ ZA=corrADC3;
 //    return 50.0/(2.0*V1/(V3+V1)-1.0);
 //    return 50.0/(2.0*corrADC1/(corrADC3+corrADC1)-1.0);  //  Calculation if V3 is voltage accross bridge
 //    tempR = 50.0*(ADC3+ZA)/(ADC1-ADC3-ZA);    // adjustment is assumed on ADC3 value
-    tempR = 50.0*(ADC3+ZeroAdjust)/(ADC1-ADC3-ZeroAdjust);    // adjustment is assumed on ADC3 value
+//    tempR = 50.0*(ADC3+ZeroAdjust)/(ADC1-ADC3-ZeroAdjust);    // adjustment is assumed on ADC3 value
+    tempR = 47.0*(ADC3+ZeroAdjust)/(ADC1-ADC3-ZeroAdjust);    // adjustment is assumed on ADC3 value
 //    diff=tempR-50.0;
     return tempR;
   }
