@@ -13,8 +13,9 @@ Revision 0.02 - December 30th, 2013
 
 //Setup some items
 #define DDS 9850
+#define PRESETS 12
 //#define DDS 9851
-#define W_CLK 11      // Pin 8 - connect to AD9851 module word load clock pin (CLK)
+#define W_CLK 11      // Pin 8 - connect to AD9850/1 module word load clock pin (CLK)
 #define FQ_UD 12      // Pin 9 - connect to freq update pin (FQ)
 #define DATA 10       // Pin 10 - connect to serial data load pin (DATA)
 #define RESET 13      // Pin 11 - connect to reset pin (RST)
@@ -37,6 +38,18 @@ int_fast32_t increment = 10;      // starting VFO update increment in HZ.
 int_fast32_t startF=7000000;      // Starting point of freq scan 
 int_fast32_t endF=7200000;        // End point of freq scan
 int_fast32_t scanInc=10000;       // Increments during scan
+int_fast32_t scanPresets [PRESETS][3] =   {{ 3500000, 3800000, 50000},
+                                    { 7000000, 7200000, 50000},
+                                    {10100000,10150000, 20000},
+                                    {14000000,14350000, 50000},
+                                    {18070000,18170000, 20000},
+                                    {21000000,21450000, 50000},
+                                    {24800000,24990000, 20000},
+                                    {28000000,29700000, 50000},
+                                    {0,0, 20000},
+                                    {0,0, 20000},
+                                    {0,0, 20000},
+                                    {0,0, 20000}};
 int scanSamples=3;                // number of reading to take at each freq during the scan
 int scanSampleCount=0;            // counter for the samples
 
@@ -56,7 +69,7 @@ String freq; // string to hold the frequency
 int_fast32_t timepassed = millis(); // int to hold the arduino miilis since startup
 int memstatus = 1;  // value to notify if memory is current or old. 0=old, 1=current.
 //float ARef = 5.0;
- float ARef = 1.1;
+float ARef = 1.1;
 
 //  Variables for Menu
 bool inMenu=0;      // 1 if in the menus, otherwise 0
@@ -65,11 +78,12 @@ int menuPos2=0;     // used to determine if menu position has changed
 //PROGMEM prog_char menu_00[]="Mode";
 //PROGMEM prog_char menu_01[]="Start Scan";
 //PROGMEM prog_char menu_02[]="End Scan";
-int menuNo=4;  //  max menu entry
+int menuNo=5;  //  max menu entry
 int menuLevel=0, menuLevel2=0;   // determines if encoder moves between menu items(0) or changes value (1)
 int menuVal=0, menuVal2=99, menuMax=9, menuMin=0;
 
 int mode=0;         // 0=SWR/R; 1=V1/V2; 2=Scan
+int presetNo=1;      // selected preset for scan limits
 
 // PROGMEM const char *menu_item[]={menu_00, menu_01, menu_02};
 
@@ -128,6 +142,7 @@ void setup() {
     else {    
       ZeroAdjust=EEPROM.read(7)  ;
     }
+    readPresets();    //  get the scan presets from memory
   }
   Serial.println("VFO Serial Output");
 
@@ -175,6 +190,11 @@ void loop() {  // MAIN LOOP  ***************************************************
       if(buttonstate == LOW) {
             if (menuLevel) {
                 menuLevel=0;
+                if (menuPos==5) { // Preset changed
+                   startF=scanPresets[presetNo-1][0];
+                   endF=scanPresets[presetNo-1][1];
+                   scanInc=scanPresets[presetNo-1][2];
+                }
                 menuVal=menuPos;
             }
             else { menuLevel=1;};
@@ -186,14 +206,9 @@ void loop() {  // MAIN LOOP  ***************************************************
         //  Exit Menu
             inMenu=0;
             showDDSFreq();
-            if (ZeroAdjust>=0) {
-              EEPROM.write(7,ZeroAdjust);    // save the ZeroAdjust value
-              EEPROM.write(8,0);             // save the sign
-            }
-            else {
-              EEPROM.write(7,-ZeroAdjust);
-              EEPROM.write(8,1);
-            }
+            //  save the zeroadjust and preset values in case they have changed
+            storeZeroAdjust();
+            storePresets();
             delay(250);  // debounce
       }
           
@@ -218,7 +233,7 @@ void loop() {  // MAIN LOOP  ***************************************************
           if ((timepassed+2000 < millis())&&(!scanning)) storeMEM();
       }
 
-      // write the V1 and V2 values to LCD, but only every 100 scans and only if not in the menus
+      // write the V1 and V2 values to LCD, but only every 2000 scans and only if not in the menus
       if (n>20000) {
           ADC1 = analogRead(Vin1);
           ADC3 = analogRead(Vin3);
@@ -259,7 +274,7 @@ void loop() {  // MAIN LOOP  ***************************************************
               scanSampleCount=0;
               if (rx>endF) {    // reached end of scan
                   scanComplete=1;
-                  Serial.println("SS");
+                  Serial.println("X");    // tell PC that scan is complete
                   scanning=0;
               }
             }
@@ -310,6 +325,11 @@ void loop() {  // MAIN LOOP  ***************************************************
       case 'X':
           scanning=0;    // finish scan
           scanSampleCount=0;
+          Serial.println("X");
+          break;
+      case 'P':
+          //  send all preset values to PC
+          printPresets();
           break;
       default:
           Serial.println("serial default");
@@ -493,15 +513,16 @@ void showFreq(int lcdCol, int lcdRow, int_fast32_t f){
 void printFreq() {
 //  millions etc are calculated in show freq, called whenever freq is changed
         Serial.print("D ");
-        Serial.print(millions);
+        Serial.print(freq);
+//        Serial.print(millions);
 //        Serial.print(".");
-        Serial.print(hundredthousands);
-        Serial.print(tenthousands);
-        Serial.print(thousands);
+//        Serial.print(hundredthousands);
+//        Serial.print(tenthousands);
+//        Serial.print(thousands);
 //        Serial.print(".");
-        Serial.print(hundreds);
-        Serial.print(tens);
-        Serial.print(ones);
+//        Serial.print(hundreds);
+//        Serial.print(tens);
+//        Serial.print(ones);
         Serial.print(" ");
         Serial.print(ADC1);
         Serial.print(" ");
@@ -568,10 +589,93 @@ void storeMEM(){
    Serial.println("Freq saved");
 }
 
+
+void storeZeroAdjust(){
+  if (ZeroAdjust>=0) {
+    EEPROM.write(7,ZeroAdjust);    // save the ZeroAdjust value
+    EEPROM.write(8,0);             // save the sign
+  }
+  else {
+    EEPROM.write(7,-ZeroAdjust);
+    EEPROM.write(8,1);
+  }
+}
+
+void printPresets() {
+//  print the preset values to the PC
+  for (int n=0; n<PRESETS; n++) {
+    printPreset(n);
+  }
+}
+
+void printPreset(int p) {
+  //  print a particular preset value to the serial port
+  Serial.print("P ");
+  Serial.print(p);
+  for (int i=0; i<3; i++) {
+     Serial.print(" ");
+     Serial.print(scanPresets[p][i]); 
+  }
+  Serial.println();
+}
+
+void storePresets(){
+  //  Save the presets values to EEPROM
+  //  Each int_fast32_t takes up 4 bytes
+  //  Start address of preset area is 9
+  for (int n=0; n<PRESETS; n++) {
+    for (int p=0; p<3; p++) {
+      store32bits(n*4+p*4+9, scanPresets[n][p]);
+    }
+  }
+}
+
+
+
+void readPresets(){
+  //  read the presets values from EEPROM
+  //  Each int_fast32_t takes up 4 bytes
+  //  Start address of preset area is 9
+  for (int n=0; n<PRESETS; n++) {
+    for (int p=0; p<3; p++) {
+      store32bits(n*4+p*4+9, scanPresets[n][p]);
+    }
+  }
+}
+
+
+
+void store32bits(int addr, int_fast32_t value){
+  //  store a 32 bit variable to EEPROM
+    byte b=0;
+    int_fast32_t tempValue;
+    tempValue=value;
+    
+    for (int n = 0; n<4; n++) {
+      b=(tempValue & 0xFF);
+//      Serial.print(b);
+      EEPROM.write(addr+n,b);
+      tempValue=tempValue >> 8;
+    }
+}
+
+int_fast32_t read32bits(int addr) {
+  //  read a 32 bit variable from EEPROM
+    byte b=0;
+    int_fast32_t tempValue=0;
+    
+    for (int n = 0; n<4; n++) {
+      b=EEPROM.read(addr+n);
+      tempValue = tempValue<<8 + b;
+    }
+    return tempValue;  
+}
+
+
+
 void showMenu() {
   //  
   char buffer[32];
-
   //  show first menu item on top line
   lcd.clear();
   switch (menuPos) {
@@ -632,6 +736,21 @@ void showMenu() {
        lcd.setCursor(0,1);
        lcdPrintInt(ZeroAdjust,4);
        break;       
+     case 5:
+       lcd.print("Preset:     ");
+       lcd.setCursor(0,1);
+       menuMax=12;       // value limits for preset change
+       menuMin=1;
+       if ((menuLevel==menuLevel2)&&(menuLevel)) {  // check if first time at this level
+           presetNo=menuVal;    //  menuVal is updated by the encoder interrupt routine
+       }
+       else {  // first time into this level
+           if (menuLevel) {menuVal=presetNo;} else {menuVal=menuPos;};
+       }
+       lcdPrintInt(presetNo,2);
+       lcd.print (":-");
+       showFreq(5,1,scanPresets[presetNo-1][0]);
+       break;
      default:
        break;
   } // of switch
