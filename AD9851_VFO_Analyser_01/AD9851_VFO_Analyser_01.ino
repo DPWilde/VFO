@@ -3,6 +3,15 @@ Code by David Wilde M0WID
 Original VFO code by Richard Visokey AD7C - www.ad7c.com
 Rotary library also by someone else.
 Revision 0.02 - December 30th, 2013
+
+Some values are stored in EEPROM:
+
+Freq 0-6 - could be improved!
+Zero Adjust 7,8
+Presets 9-PRESETS*3*4 - currently 144 bytes
+Attenuator - 200
+powerCalPoints 202-217
+
 */
 
 // Include the library code
@@ -22,18 +31,20 @@ Revision 0.02 - December 30th, 2013
 #define R_BUTTON 4    // Rotary encoder button
 #define L_BUTTON 5    // Left hand button for Menu access
 #define TEST_SWITCH 6 // Turns the DDS output on and off
-#define Vin1 A0         // V1 analogue input (Ground to mid point of fixed 50R branch)
+#define Vin1 A0         // V1 analogue input (Ground to input from DDS)
+#define Vin2 A2         // V2 analogue input (voltage across load resistor - measures current)
 #define Vin3 A1         // V3 analogue input (Ground to mid point of branch with antenna - voltage across antenna)
-#define OpAmpGain 10  // Gain of Op amp used for reading the V1/V3 values = 100k/10k
+#define Vin4 A3         // V4 analogue input - signal AD8307 log amp, or another diode detector, used for scalar analyser
+#define OpAmpGain 1.50  // Gain of Op amp used for reading the V1/V3 values = 15k/10k
 #define pulseHigh(pin) {digitalWrite(pin, HIGH); digitalWrite(pin, LOW); }
 #define F_MAX 30000000  // Max frequency limit
 #define F_MIN 1000000   // Min Frequency limit
-Rotary r = Rotary(3,2); // sets the pins the rotary encoder uses.  Must be interrupt pins.
+Rotary r = Rotary(2,3); // sets the pins the rotary encoder uses.  Must be interrupt pins.
 
 LiquidCrystal_I2C lcd(0x27, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);
 int_fast32_t rx=7200000;          // Starting frequency of VFO
 int_fast32_t rx2=1;               // variable to hold the updated frequency
-int_fast32_t increment = 10;      // starting VFO update increment in HZ.
+int_fast32_t increment = 10000;    // starting VFO update increment in HZ.
 
 int_fast32_t startF=7000000;      // Starting point of freq scan 
 int_fast32_t endF=7200000;        // End point of freq scan
@@ -50,6 +61,11 @@ int_fast32_t scanPresets [PRESETS][3] =   {{ 3500000, 3800000, 50000},
                                     {0,0, 20000},
                                     {0,0, 20000},
                                     {0,0, 20000}};
+int powerCalPoints [2][2] = {{270,800},
+                             {170,400}};        // Storage for the power calibration points
+                                  // First index selects the calibration point
+                                  // Second index selects the values (0 = dBm*10, 1 = corresponding ADC4 value)
+                                    
 int scanSamples=3;                // number of reading to take at each freq during the scan
 int scanSampleCount=0;            // counter for the samples
 
@@ -59,11 +75,13 @@ bool serialOn=0;                  // flag used to turn osc on/off via serial por
 bool oscOn=0;                     // used to indicate if oscillator is to be turned on or not
 bool oscOn2=1;                    // previous oscillator state
 
-int buttonstate = 0, LbuttonState = 0;      // state of rotary encoder button and Left Button
+int buttonState = 0, LButtonState = 0;      // state of rotary encoder button and Left Button
+int buttonState1 = 0, LButtonState1 = 0;    // state of rotary encoder button and Left Button last time
 int testSwitchState =0;
 
-String hertz = "10 Hz";
-int  hertzPosition = 8;
+int ButtonCount, LButtonCount=0;    // count how long the button is pressed to determine if long or short press
+
+int  hertzPosition = 4;             // position of cursor for adjusting freq
 byte ones,tens,hundreds,thousands,tenthousands,hundredthousands,millions ;  //Placeholders
 String freq; // string to hold the frequency
 int_fast32_t timepassed = millis(); // int to hold the arduino miilis since startup
@@ -73,27 +91,33 @@ float ARef = 1.1;
 
 //  Variables for Menu
 bool inMenu=0;      // 1 if in the menus, otherwise 0
+bool testOn=0;      // 1 if oscillator on via LButton
 int menuPos=0;      // used so returns to previous menu position when re-entering the menu
 int menuPos2=0;     // used to determine if menu position has changed
 //PROGMEM prog_char menu_00[]="Mode";
 //PROGMEM prog_char menu_01[]="Start Scan";
 //PROGMEM prog_char menu_02[]="End Scan";
-int menuNo=5;  //  max menu entry
+int menuNo=8;  //  max menu entry
 int menuLevel=0, menuLevel2=0;   // determines if encoder moves between menu items(0) or changes value (1)
 int menuVal=0, menuVal2=99, menuMax=9, menuMin=0;
 
-int mode=0;         // 0=SWR/R; 1=V1/V2; 2=Scan
+int mode=0;         // 0=SWR/R; 1=V1/V2; 2=Scan ; 3=Power; 4=Power Calibration point 1; 5=Power Calibration Point 2
 int presetNo=1;      // selected preset for scan limits
 
 // PROGMEM const char *menu_item[]={menu_00, menu_01, menu_02};
 
 int ForceFreq = 0;  // Change this to 0 after you upload and run a working sketch to activate the EEPROM memory.  YOU MUST PUT THIS BACK TO 0 AND UPLOAD THE SKETCH AGAIN AFTER STARTING FREQUENCY IS SET!
 
-double n=0;              //  used to count intevals between analogue updates
-int ADC1, ADC3;          //  values read from Analog inputs relating to V1 and V3
-float R;                 //  calculated resistance of load
+double n=0;              //  used to count intervals between analogue updates
+int_fast32_t ADC1, ADC2, ADC3, ADC4;    //  values read from Analog inputs relating to V1, V2 and V3 and V4 from AD8307
+float R, X;              //  calculated resistance and reactance of load
 float SWR;               //  calculated SWR of load against 50R
-int ZeroAdjust=0;       //  offset to correct for minor errors in op amp gains and different R values - difference between ADC1 and ADC3 with 50R load
+float dBm;               //  Calculated power in dBm, corrected for attenuator value
+int dBmx10;              //  dBm to 1 decimal place, *10  
+int attenuator;          //  Value of attenuator fitted * 10 in dB
+float power;             //  Calculated power in watts or milliwatts, corrected for attenuator value
+int ZeroAdjust=0;        //  offset to correct for minor errors in op amp gains and different R values - difference between ADC1 and ADC3 with no load
+int V2Adjust=0;          //  offset to correct for minor component tolerance errors - difference between ADC2 and ADC3 with 50R load
 
 void setup() {
   pinMode(R_BUTTON,INPUT); // Connect to a button that goes to GND on push
@@ -104,9 +128,13 @@ void setup() {
   digitalWrite(TEST_SWITCH,HIGH);  //  Turn on pull up resistor
   pinMode(Vin1, INPUT);
   digitalWrite(Vin1,LOW);
+  pinMode(Vin2, INPUT);
+  digitalWrite(Vin2,LOW);
   pinMode(Vin3, INPUT);
-  
   digitalWrite(Vin3,LOW);
+  pinMode(Vin4, INPUT);
+  digitalWrite(Vin4,LOW);
+ 
   // initialize the serial communication:
   Serial.begin(9600);
   
@@ -129,37 +157,33 @@ void setup() {
   pulseHigh(W_CLK);
   pulseHigh(FQ_UD);  // this pulse enables serial mode on the AD9850/51 - Datasheet page 12.
   lcd.setCursor(hertzPosition,0);    
-  //lcd.print(hertz);
    // Load the stored frequency  
   if (ForceFreq == 0) {
     Serial.println("Reading EEPROM");
     freq = String(EEPROM.read(0))+String(EEPROM.read(1))+String(EEPROM.read(2))+String(EEPROM.read(3))+String(EEPROM.read(4))+String(EEPROM.read(5))+String(EEPROM.read(6));
     rx = freq.toInt();
     // read the saved zero adjust value.  Can be negative!
-    if (EEPROM.read(8)) {    //  value is negative
-      ZeroAdjust=-EEPROM.read(7)  ;
-    }
-    else {    
-      ZeroAdjust=EEPROM.read(7)  ;
-    }
-    readPresets();    //  get the scan presets from memory
+    ZeroAdjust=read16bits(7);
+    readPresets();            //  get the scan presets from memory
+    readCalPoints();          //  get the Power calibration points from memory - locations 50-57
+    attenuator = read16bits(200);
   }
   Serial.println("VFO Serial Output");
-
 }
 
 
 void loop() {  // MAIN LOOP  **********************************************************************************
 
   byte commandChar=0;             //  received character
-  buttonstate = digitalRead(R_BUTTON);
-  LbuttonState = digitalRead(L_BUTTON);
-  testSwitchState = digitalRead(TEST_SWITCH);
+  LButtonState1=LButtonState;   // store state of buttons last time round the loop
+  buttonState1=buttonState;
+  buttonState = digitalRead(R_BUTTON);
+  LButtonState = digitalRead(L_BUTTON);
+//  testSwitchState = digitalRead(TEST_SWITCH);
   
     //  test if the oscillator is to be on or off
-  oscOn=((testSwitchState==LOW)||(scanning)||(serialOn))&&(!inMenu);
+  oscOn=((testOn)||(scanning)||(serialOn))&&(!inMenu);
   if ((rx != rx2)||(oscOn!=oscOn2)) {                    // Frequency has changed
-        // make sure it is in limits
         rx=checkFreq(rx);            // check in bounds
         showDDSFreq();              //  update frequency on the LCD, but not to the serial port
         if (oscOn) {
@@ -178,6 +202,7 @@ void loop() {  // MAIN LOOP  ***************************************************
       scanning=0;  
       scanComplete=0;
       serialOn=0;
+      testOn=0;
       
       //  display menu text if position has changed
       if ((menuPos!=menuPos2)||(menuVal!=menuVal2)) {
@@ -187,7 +212,8 @@ void loop() {  // MAIN LOOP  ***************************************************
       }
 
       //  press or encoder button changes from changing menu (line 0) to changing value (line 1)
-      if(buttonstate == LOW) {
+      if(buttonState == LOW) {
+            Serial.println("menu RButton Press");
             if (menuLevel) {
                 menuLevel=0;
                 if (menuPos==5) { // Preset changed
@@ -202,41 +228,79 @@ void loop() {  // MAIN LOOP  ***************************************************
             delay(250);
       };
     
-      if(LbuttonState==HIGH) {    // NC button!
+      if((LButtonState==HIGH)&&(LButtonState1==LOW)) {    // NC button!  Only change on edge
         //  Exit Menu
             inMenu=0;
             showDDSFreq();
             //  save the zeroadjust and preset values in case they have changed
+            Serial.print("Saving values on menu exit");
             storeZeroAdjust();
             storePresets();
+            storeCalPoints();
+            store16bits(200,attenuator);
+
+            while (digitalRead(L_BUTTON)==HIGH) {  // wait until button released
+            }
             delay(250);  // debounce
+            LButtonState=LOW;
       }
+      else {
+            LButtonCount=0;
+      };
           
   }
   else {    // not in menu
-      if(buttonstate == LOW) {
+      if(buttonState == LOW) {
             setincrement();        
       };
     
-      if(LbuttonState==HIGH) {      // NC button
-        //  Enter Menu
-        //  Rotary Encoder now changes the menu selection until the encoder button is pressed
-        //  pressing the L_BUTTON again exists the menu
-            storeMEM();  // save to memory in case < 2 secs have elapsed since it was changed
-            inMenu=1;
-            menuLevel=0;
-            showMenu();
-            delay(250);  // crude debounce
+      //  use counter to determine if button pressed for long time or not
+      if(LButtonState==HIGH) {      // NC button
+            LButtonCount++;
+            delay(100);
+            if(LButtonCount>20) {    // pressed for 2 sec so enter menu
+            //  Enter Menu
+            //  Rotary Encoder now changes the menu selection until the encoder button is pressed
+            //  pressing the L_BUTTON again exists the menu
+                storeMEM();  // save to memory in case < 2 secs have elapsed since it was changed
+                inMenu=1;
+                menuLevel=0;
+                showMenu();
+                testOn=0;
+                //  loop until button has been released
+                while (digitalRead(L_BUTTON)==HIGH) {
+                }
+                delay(250);
+            }
+      } else {  // LButtonSate is LOW - button not pressed
+            if ((LButtonState1==HIGH) && (!inMenu)) {  //  Button released before menu entered
+              if ((mode==0)||(mode==1)) {                //  SWR or ADC modes
+                testOn=!testOn;                      // toggle the oscillator
+              }
+              else if (mode==4) {                      //  Power cal point 1
+                saveCalPoint(1);
+              }
+              else if (mode==5) {                      //  Power cal point 2
+                saveCalPoint(2);
+              }
+            }  
+            LButtonCount=0;
       }
+      
         // Write the frequency to memory if not stored and 2 seconds have passed since the last frequency change.
       if(memstatus == 0){   
           if ((timepassed+2000 < millis())&&(!scanning)) storeMEM();
       }
 
-      // write the V1 and V2 values to LCD, but only every 2000 scans and only if not in the menus
-      if (n>20000) {
+      
+      // write the V1 and V2 values to LCD, but only every so many scans and only if not in the menus
+      if (n>15000) {
           ADC1 = analogRead(Vin1);
+          ADC2 = analogRead(Vin2);
           ADC3 = analogRead(Vin3);
+          ADC4 = analogRead(Vin4);
+        //Serial.print("4 ");        //~~~~~~~~~~~~~Debug~~~~~~~~~~~~~~~~~
+        //Serial.println(ADC4);        //~~~~~~~~~~~~~Debug~~~~~~~~~~~~~~~~~
           lcd.setCursor(0,1);
           lcd.noCursor();
           switch (mode) {
@@ -244,9 +308,11 @@ void loop() {  // MAIN LOOP  ***************************************************
               showSWR();
               break;
             case 1:  //Show ADC values
-              lcd.print("1=");
+              lcd.print("A");
               lcdPrintInt(ADC1,4);
-              lcd.print(" 3=");
+              lcd.print(",");
+              lcdPrintInt(ADC2,4);
+              lcd.print(",");
               lcdPrintInt(ADC3,4);
               break;
             case 2:  // Show Scan progress as well as SWR and R
@@ -254,6 +320,21 @@ void loop() {  // MAIN LOOP  ***************************************************
               lcd.setCursor(0,0);
               lcdPrintInt(scanSampleCount,2);
               break;
+            case 3:  // Power - display ADC value and power in dBm and watts
+              showPower();
+              break;
+            case 4:  // Power calibration point 1
+              // Display dBm value and allow it to be changed with rotary coder
+              // Display ADC4
+              // Short press of menu button stores the value
+              showCal(1);
+              break;       
+            case 5:  // Power calibration point 2
+              // Display dBm value and allow it to be changed with rotary coder
+              // Display ADC4
+              // Short press of menu button stores the value
+              showCal(2);
+              break;       
             default:
               lcd.print("                ");
               break;
@@ -261,7 +342,7 @@ void loop() {  // MAIN LOOP  ***************************************************
           lcd.setCursor(hertzPosition,0);  //  put the cursor back under the frequency digit to be changed
           lcd.cursor();
          
-          if (oscOn) printFreq();
+          if (oscOn) printFreq();          //  send the data to the serial port
           n=0;
           
           if (scanning) {
@@ -286,7 +367,6 @@ void loop() {  // MAIN LOOP  ***************************************************
 
   }  // not in Menu
 
-
   // Check if any serial commands received 
   if (Serial.available()>0) {
     //    Serial.write(Serial.read());  
@@ -305,11 +385,17 @@ void loop() {  // MAIN LOOP  ***************************************************
       case 'I':
           scanInc=Serial.parseFloat();
           break;
+      case 'C':
+          V2Adjust=Serial.parseFloat();
+          break;
       case 'O':    // Letter O
           ZeroAdjust=Serial.parseFloat();
           break;
       case 'Y':
           if (!inMenu) serialOn=1;    //  Turn oscillator on, but only if not in the menus
+          break;
+      case 'M':          // Change mode
+          mode=Serial.parseInt();
           break;
       case 'N':
           serialOn=0;    // Turn oscillator off
@@ -364,21 +450,38 @@ ISR(PCINT2_vect) {
         }
       }
     }
-    else {
-      if (result == DIR_CW){rx=rx+increment;}
-      else {rx=rx-increment;};       
-      rx=checkFreq(rx);
-//        if (rx >F_MAX){rx=rx2;}; // UPPER VFO LIMIT
-//        if (rx <F_MIN){rx=rx2;}; // LOWER VFO LIMIT
+    else {  // not in menu
+      switch(mode) {
+      case 0:  //SWR - changes frequency
+        if (result == DIR_CW){rx=rx+increment;}
+        else {rx=rx-increment;};       
+        break;
+      case 1:  // ADC - changes frequency
+        if (result == DIR_CW){rx=rx+increment;}
+        else {rx=rx-increment;};       
+        break;
+      case 2:  //Scan - does nothing
+        break;
+      case 3:  //Power - changes attenuator setting
+        if (result==DIR_CW) {
+          attenuator++;
+        }
+        else {
+          attenuator--;
+        }
+        break;
+      default:
+        break;
+      }
     }
   }
 }
 
-int_fast32_t checkFreq(int_fast32_t f) {
+int_fast32_t checkFreq(int_fast32_t fc) {
   // if out of bounds then revert to previous frequency value
-  if (f >F_MAX){f=rx2;}; // UPPER VFO LIMIT
-  if (f <F_MIN){f=rx2;}; // LOWER VFO LIMIT
-  return f;
+  if (fc >F_MAX){fc=F_MAX;}; // UPPER VFO LIMIT
+  if (fc <F_MIN){fc=F_MIN;}; // LOWER VFO LIMIT
+  return fc;
 }
 
 
@@ -411,12 +514,12 @@ void tfr_byte(byte data)
 }
 
 void setincrement(){
-  if(increment == 10){increment = 100; hertz = "100 Hz"; hertzPosition=7;}
-  else if (increment == 100){increment = 1000; hertz="1 kHz"; hertzPosition=5;}
-  else if (increment == 1000){increment = 10000; hertz="10 Khz"; hertzPosition=4;}
-  else if (increment == 10000){increment = 100000; hertz="100 Khz"; hertzPosition=3;}
-  else if (increment == 100000){increment = 1000000; hertz="1 Mhz"; hertzPosition=1;}  
-  else{increment = 10; hertz = "10 Hz"; hertzPosition=8;};  
+  if(increment == 10){increment = 100;  hertzPosition=7;}
+  else if (increment == 100){increment = 1000;  hertzPosition=5;}
+  else if (increment == 1000){increment = 10000;  hertzPosition=4;}
+  else if (increment == 10000){increment = 100000;  hertzPosition=3;}
+  else if (increment == 100000){increment = 1000000;  hertzPosition=1;}  
+  else{increment = 10;  hertzPosition=8;};  
    lcd.cursor();
    lcd.setCursor(hertzPosition,0); 
    delay(250); // Adjust this delay to speed up/slow down the button menu scroll speed.
@@ -424,33 +527,95 @@ void setincrement(){
 
 void lcdPrintInt(int i, int charNum) {
   //  print with right justify.  Always uses charNum space on the lcd
-  //  No check to make sure value fits in charNum space
+  //  No check to make sure value fits in charNum space, no check on charNum value
     if (i>=0) {
       if ((i<10000)&&(charNum>4)) lcd.print(" ");
       if ((i<1000)&&(charNum>3)) lcd.print(" ");
       if ((i<100)&&(charNum>2)) lcd.print(" ");
       if ((i<10)&&(charNum>1)) lcd.print(" ");
     }
-    else {  //negative - to keep simple ignore possibility of negative numbers less than -9999
-      if ((i<-1000)&&(charNum>4)) lcd.print(" ");
-      if ((i<-100)&&(charNum>3)) lcd.print(" ");
-      if ((i<10)&&(charNum>2)) lcd.print(" ");
-      if ((i<10)&&(charNum>1)) lcd.print(" ");
+    else {  //negative - to keep simple ignore possibility of negative numbers less than -999
+      if ((i>-1000)&&(charNum>4)) lcd.print(" ");
+      if ((i>-100)&&(charNum>3)) lcd.print(" ");
+      if ((i>-10)&&(charNum>2)) lcd.print(" ");
+      if ((i>-1)&&(charNum>1)) lcd.print(" ");
     }
     lcd.print(i);
 }
 
+void lcdPrintIntAsDecimal(int i, int charNum, int decimalPos) {
+  //  routine to display a number stored as integer as a decimal
+  //  split up into the integer and decimal parts
+  int decimal, whole, mult, p, cNum;
+  if (decimalPos == 0) {
+    lcdPrintInt(i,charNum);
+  }
+  else {
+    whole = i;
+    mult=1;
+    cNum=charNum;
+    for (p=0; p<decimalPos; p++) {
+      whole = whole/(10);
+      mult=mult*10;
+    }
+    decimal=i % mult;
+    if (decimal<0) {
+      if (whole==0) lcd.print("-");
+      decimal = decimal * -1;    //  Could be optimised, but easier to follow code
+      cNum=cNum--;               // leave space for the - sign
+    }
+    lcdPrintInt(whole,cNum-decimalPos-1);
+    lcd.print(".");
+    lcdPrintInt(decimal,decimalPos);
+  }  
+}
+
 void showSWR() {
-    R=calcR(ADC1, ADC3);
+  if (oscOn) { 
+    R=calcR();
+    X=calcX();
     if (R>=50.0) {SWR=R/50.0;} else {SWR=50.0/R;};
-    lcd.print("S=");
+    if (SWR > 99.0) SWR=99.9;  // limit to avoid display going wrong
     if (SWR<10.00) lcd.print(" ");
     lcd.print(SWR,2);
-    lcd.print(" R=");
-    if (R<1000.00) lcd.print(" ");
-    if (R<100.00) lcd.print(" ");
-    if (R<10.00) lcd.print(" ");
-    lcd.print(R);
+    lcd.print(",");
+    if (R >=1000.0) R=999.9;
+    if (R<1000.0) lcd.print(" ");
+    if (R<100.0) lcd.print(" ");
+    if (R<10.0) lcd.print(" ");
+    lcd.print(R,1);
+  }
+  else {
+    lcd.print("OFF             ");
+  }
+}
+
+void showPower() {
+  calcdBm();
+  calcWatts();
+  lcd.setCursor(0,0);
+  lcd.print("Power: ");
+  lcd.print(dBm);
+  lcd.print("dBm   ");
+  lcd.setCursor(0,1);
+  lcd.print(power);
+  lcd.print("Watts     ");
+}
+
+void showCal(int point) {
+  //  Display the values for the selected power calibration point
+  //  First line is the Point number, with the set power level in dBm (no allowance for attenuator!)
+  //  Second line is the current setting and the current ADC4 value
+  lcd.setCursor(0,0);
+  lcd.print("Power Cal ");
+  lcdPrintInt(point,1);
+  lcd.print(" ");
+  lcdPrintIntAsDecimal(powerCalPoints[point-1][0],4,1);
+  lcd.print("dBm");
+  lcd.setCursor(1,0);
+  lcdPrintInt(powerCalPoints[point-1][1],4);
+  lcd.print(", ");
+  lcdPrintInt(ADC4,4);
 }
 
 void showDDSFreq(bool SerialOut){
@@ -461,18 +626,7 @@ void showDDSFreq(bool SerialOut){
     hundreds = ((rx/100)%10);
     tens = ((rx/10)%10);
     ones = ((rx/1)%10);
-    lcd.setCursor(0,0);
-   if (millions > 9){lcd.setCursor(0,0);}
-   else{lcd.print(" ");}
-    lcd.print(millions);
-    lcd.print(",");
-    lcd.print(hundredthousands);
-    lcd.print(tenthousands);
-    lcd.print(thousands);
-    lcd.print(",");
-    lcd.print(hundreds);
-    lcd.print(tens);
-    lcd.print(ones);
+    showFreq(0,0,rx);
     lcd.print("hz  ");
     if (oscOn) {
         if(scanning) {lcd.print("S");} else {lcd.print(" I");}
@@ -511,48 +665,32 @@ void showFreq(int lcdCol, int lcdRow, int_fast32_t f){
 
 
 void printFreq() {
-//  millions etc are calculated in show freq, called whenever freq is changed
         Serial.print("D ");
-        Serial.print(freq);
-//        Serial.print(millions);
-//        Serial.print(".");
-//        Serial.print(hundredthousands);
-//        Serial.print(tenthousands);
-//        Serial.print(thousands);
-//        Serial.print(".");
-//        Serial.print(hundreds);
-//        Serial.print(tens);
-//        Serial.print(ones);
+        Serial.print(rx);
         Serial.print(" ");
         Serial.print(ADC1);
         Serial.print(" ");
-        Serial.println(ADC3+ZeroAdjust);
-        //Serial.print(", ZeroAdjust=");
-        //Serial.println(ZeroAdjust);
-//        Serial.print(" Mhz  ");
+        Serial.print(ADC2);
+        Serial.print(" ");
+        Serial.print(ADC3);
+        Serial.print(" ");
+        Serial.println(ADC4);
 }
 
-float calcR(int ADC1, int ADC3) {
+float calcR() {
 //  Calculate the resistance of the load from the input voltage(V1) and bridge voltage (V3)
 //  V2 is the voltage across the load.  ADC1 and ADC3 are the raw values from the A-D convertor
 //  We need to be careful to avoid overflows as V3 approaches V1 in value, when the load is far from 50R
 //  Also we measure RMS value of V3 so cannot determine if it is -ve, so cannot determine if Rx is > or < 50R
-//  Maybe best to also measure V2, or measure V2 instead of V3?
-//  For the moment ignore the forward voltage drop on the diodes, but the germanium diodes are non-linear in this region
-//  and the value should be corrected
 //
 //  Formula Rx = 50/(V1/(V3+V1/2)-1)
-//  First calculate the voltages
-//  Assume forward voltage drop proportional to measured V (not true)
 //  And just add a value to the ADC reading to compensate
 
 float tempR;
 float diff;
-  
-  //  We have OpAmp gain of 100, resolution 1024, so actual measured voltage after diodes should be ADC*100*Aref/1024
-//  V1=float(ADC1)*100.0*ARef/1024.0
-//  V3=float(ADC3)*100.0*ARef/1024.0
-
+float t1;
+unsigned long adc1_2, adc2_2, adc3_2, vDiff;
+ 
 float corrADC3;
 int ZA;
 
@@ -561,19 +699,67 @@ ZA=corrADC3;
 
 //corrADC1=ADC1+0.2;
 //corrADC3=ADC3+21.0*sqrt(ADC3)-0.5*ADC3;
-  
-  if ((ADC1-ADC3-ZA)<10) {    //  very high resistance or open circuit
+  if (ADC1=1023) {       //  Overflow, open circuit load
     return 999.9;
   }
-  else {
-//    return 50.0/(2.0*V1/(V3+V1)-1.0);
-//    return 50.0/(2.0*corrADC1/(corrADC3+corrADC1)-1.0);  //  Calculation if V3 is voltage accross bridge
-//    tempR = 50.0*(ADC3+ZA)/(ADC1-ADC3-ZA);    // adjustment is assumed on ADC3 value
-//    tempR = 50.0*(ADC3+ZeroAdjust)/(ADC1-ADC3-ZeroAdjust);    // adjustment is assumed on ADC3 value
-    tempR = 47.0*(ADC3+ZeroAdjust)/(ADC1-ADC3-ZeroAdjust);    // adjustment is assumed on ADC3 value
-//    diff=tempR-50.0;
+  else if (ADC2<20) {    //  low current - very high resistance or open circuit
+    return 999.9;
+  }
+  else if (ADC3<20) {    //   low output voltage, short circuit or very low R
+    return 0.0;
+  }
+  else {             //   Calculate R
+    //  Vr = (V1^2-V2^2-V3^2)/2*V2
+    //  I = V2/51
+    //  R = Vr/I = 51*(V1^2-V2^2-V3^2)/2*V2^2 = 25.5*(ADC1*ADC1-ADC2*ADC2-ADC3*ADC3)/(ADC2*ADC2)
+    if (ADC1 > ADC2+ADC3) {
+      // Impossible - assume pure resistance and calculate based on ADC3/ADC1
+      t1 = ADC1/(ADC1/2+ADC3);
+      tempR = 51.0/(t1-1.0);
+    }
+    else {
+      adc1_2 = ADC1*ADC1;
+      adc2_2 = ADC2*ADC2;
+      adc3_2 = ADC3*ADC3;
+      vDiff = adc1_2-adc2_2-adc3_2;
+      tempR = 25.5*(vDiff)/adc2_2;
+      Serial.println(adc1_2);
+      Serial.println(adc2_2);
+      Serial.println(adc3_2);
+      Serial.println(vDiff);
+    }
     return tempR;
   }
+}
+
+float calcX() {
+ //  Calculate the reactance.
+ //  We measure overall voltage, voltage across antenna and voltage across R, leading to a vector diagram.
+ //  If perfect zero reactance, then ADC1=ADC2+ADC3.
+ //  If reactance exists then ADC1>ADC2+ADC3, but we cannot determine the sign with this design
+ float X;
+ float R;
+ X=0;
+ return X;
+} 
+
+void calcdBm() {
+  // routine to calculate measdured power in dBm based on ADC4 value, calibration points and attenuator
+  // dBm*10 = (Dc1-Dc2)*(Vx-Vc2)/(Vc1-Vc2) + Dc2
+  // For V substitute ADC4 values for the relevant points, conversion to V cancels out
+  float intdBm;
+  float slope;
+  
+  slope=(powerCalPoints[0][0]-powerCalPoints[1][0])/(powerCalPoints[0][1]-powerCalPoints[1][1]);
+  intdBm = slope*(ADC4-powerCalPoints[1][1])+powerCalPoints[1][0];
+  dBm=(intdBm + attenuator)/10.0;
+  dBmx10=intdBm + attenuator;      //  May need to do some casting of variables
+}
+
+void calcWatts() {
+  // routine to calculate the power in watts or milliwatts (maybe even microwatts)
+  
+  power=pow(10,dBm/10.0);
 }
 
 void storeMEM(){
@@ -586,19 +772,34 @@ void storeMEM(){
    EEPROM.write(5,tens);
    EEPROM.write(6,ones);   
    memstatus = 1;  // Let program know memory has been written
-   Serial.println("Freq saved");
+   //Serial.println("Freq saved");
 }
 
 
 void storeZeroAdjust(){
-  if (ZeroAdjust>=0) {
-    EEPROM.write(7,ZeroAdjust);    // save the ZeroAdjust value
-    EEPROM.write(8,0);             // save the sign
-  }
-  else {
-    EEPROM.write(7,-ZeroAdjust);
-    EEPROM.write(8,1);
-  }
+  store16bits(7,ZeroAdjust);
+}
+
+void saveCalPoint(int p) {
+  //  get current ADC4 value, put in the relevant position in the calibration point array, and save the array to EEPROM
+  powerCalPoints[p-1][1]=ADC4;
+  storeCalPoints();
+}
+
+void storeCalPoints() {
+  // save the power cal points array to EEPROM
+  // not many points so do it the long way
+  store16bits(202,powerCalPoints[0][0]);
+  store16bits(204,powerCalPoints[1][0]);
+  store16bits(206,powerCalPoints[0][1]);
+  store16bits(208,powerCalPoints[1][1]);
+}
+
+void readCalPoints() {
+  powerCalPoints[0][0] = read16bits(202);
+  powerCalPoints[1][0] = read16bits(204);
+  powerCalPoints[0][1] = read16bits(206);
+  powerCalPoints[1][1] = read16bits(207);
 }
 
 void printPresets() {
@@ -647,6 +848,7 @@ void readPresets(){
 
 void store32bits(int addr, int_fast32_t value){
   //  store a 32 bit variable to EEPROM
+  //  low byte first
     byte b=0;
     int_fast32_t tempValue;
     tempValue=value;
@@ -658,6 +860,17 @@ void store32bits(int addr, int_fast32_t value){
       tempValue=tempValue >> 8;
     }
 }
+
+void store16bits(int addr, int value){
+  //  store a 16 bit variable to EEPROM
+  //  low byte first
+   
+      EEPROM.write(addr,lowByte(value));
+      EEPROM.write(addr+1,highByte(value));
+    Serial.print("store16: ");
+    Serial.println(value);
+}
+
 
 int_fast32_t read32bits(int addr) {
   //  read a 32 bit variable from EEPROM
@@ -671,6 +884,17 @@ int_fast32_t read32bits(int addr) {
     return tempValue;  
 }
 
+int read16bits(int addr) {
+  //  read a 16 bit variable from EEPROM
+    byte b;
+    word readValue=0;
+  
+    b = EEPROM.read(addr+1);
+    readValue = (b << 8) + EEPROM.read(addr);
+    Serial.print("Read16: ");
+    Serial.println(readValue);
+    return readValue;  
+}
 
 
 void showMenu() {
@@ -682,7 +906,7 @@ void showMenu() {
      case 0:
        lcd.print("Mode: ");
        lcd.setCursor(0,1);
-       menuMax=2;       // value limits for mode change
+       menuMax=5;       // value limits for mode change
        menuMin=0;
        if ((menuLevel==menuLevel2)&&(menuLevel)) {
            mode=menuVal;    //  menuVal is updated with encoder interrupt routine
@@ -697,10 +921,19 @@ void showMenu() {
              lcd.print(" SWR/R   ");
              break;
            case 1: 
-             lcd.print(" V1/V2   ");
+             lcd.print(" A/D     ");
              break;
            case 2: 
              lcd.print(" Scan    ");
+             break;
+           case 3:
+             lcd.print(" Power   ");
+             break;
+           case 4:
+             lcd.print(" PCal 1  ");
+             break;
+           case 5:
+             lcd.print(" PCal 2  ");
              break;
            default: 
              lcd.print(" Invalid!");
@@ -751,6 +984,57 @@ void showMenu() {
        lcd.print (":-");
        showFreq(5,1,scanPresets[presetNo-1][0]);
        break;
+     case 6:
+       lcd.print("Attenuator *10:");
+       lcd.setCursor(0,1);
+       menuMax=600;       // value limits for Attenuator Adjustment
+       menuMin=-100;
+       if ((menuLevel==menuLevel2)&&(menuLevel)) {
+           if (attenuator!=menuVal) {
+             attenuator=menuVal;    //  menuVal is updated with encoder interrupt routine
+           }
+       }
+       else {  // first time into this level
+           if (menuLevel) {menuVal=attenuator; } else {menuVal=menuPos; };
+       }
+       lcd.print("            ");
+       lcd.setCursor(0,1);
+       lcdPrintIntAsDecimal(attenuator,5,1);
+       break;       
+     case 7:
+       lcd.print("Pcal 1 dBm * 10:");
+       lcd.setCursor(0,1);
+       menuMax=170;       // value limits for Calibration point 1
+       menuMin=-900;
+       if ((menuLevel==menuLevel2)&&(menuLevel)) {
+           if (powerCalPoints[0][0]!=menuVal) {
+             powerCalPoints[0][0]=menuVal;    //  menuVal is updated with encoder interrupt routine
+           }
+       }
+       else {  // first time into this level
+           if (menuLevel) {menuVal=powerCalPoints[0][0]; } else {menuVal=menuPos; };
+       }
+       lcd.print("            ");
+       lcd.setCursor(0,1);
+       lcdPrintIntAsDecimal(powerCalPoints[0][0],5,1);
+       break;       
+     case 8:
+       lcd.print("Pcal 2 dBm * 10:");
+       lcd.setCursor(0,1);
+       menuMax=170;       // value limits for Calibration point 2
+       menuMin=-900;
+       if ((menuLevel==menuLevel2)&&(menuLevel)) {
+           if (powerCalPoints[1][0]!=menuVal) {
+             powerCalPoints[1][0]=menuVal;    //  menuVal is updated with encoder interrupt routine
+           }
+       }
+       else {  // first time into this level
+           if (menuLevel) {menuVal=powerCalPoints[1][0]; } else {menuVal=menuPos; };
+       }
+       lcd.print("            ");
+       lcd.setCursor(0,1);
+       lcdPrintIntAsDecimal(powerCalPoints[1][0],5,1);
+       break;       
      default:
        break;
   } // of switch
