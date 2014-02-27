@@ -29,8 +29,7 @@ powerCalPoints 202-217
 #define DATA 10       // Pin 10 - connect to serial data load pin (DATA)
 #define RESET 13      // Pin 11 - connect to reset pin (RST)
 #define R_BUTTON 4    // Rotary encoder button
-#define L_BUTTON 5    // Left hand button for Menu access
-#define TEST_SWITCH 6 // Turns the DDS output on and off
+#define M_BUTTON 5    // Button for Menu access
 #define Vin1 A0         // V1 analogue input (Ground to input from DDS)
 #define Vin2 A2         // V2 analogue input (voltage across load resistor - measures current)
 #define Vin3 A1         // V3 analogue input (Ground to mid point of branch with antenna - voltage across antenna)
@@ -75,11 +74,16 @@ bool serialOn=0;                  // flag used to turn osc on/off via serial por
 bool oscOn=0;                     // used to indicate if oscillator is to be turned on or not
 bool oscOn2=1;                    // previous oscillator state
 
-int buttonState = 0, LButtonState = 0;      // state of rotary encoder button and Left Button
-int buttonState1 = 0, LButtonState1 = 0;    // state of rotary encoder button and Left Button last time
-int testSwitchState =0;
+bool rButtonPress = 0, mButtonPress = 0;      // state of rotary encoder button and Left Button
+bool rButtonPress1 = 0, mButtonPress1 = 0;    // state of rotary encoder button and Left Button last time
+bool mButtonLong=0;  // menu button long press pulse
+bool mButtonShort=0; // menu button short press pulse
+bool rButtonLong=0;  // Rotary coder long button press pulse
+bool rButtonShort=0; // Rodary coder short button pulse
+//bool mButtonLongMem;
+//bool rButtonLongMem;
+int rButtonCount, mButtonCount=0;    // count how long the button is pressed to determine if long or short press
 
-int ButtonCount, LButtonCount=0;    // count how long the button is pressed to determine if long or short press
 
 int  hertzPosition = 4;             // position of cursor for adjusting freq
 byte ones,tens,hundreds,thousands,tenthousands,hundredthousands,millions ;  //Placeholders
@@ -90,6 +94,7 @@ int memstatus = 1;  // value to notify if memory is current or old. 0=old, 1=cur
 float ARef = 1.1;
 
 //  Variables for Menu
+
 bool inMenu=0;      // 1 if in the menus, otherwise 0
 bool testOn=0;      // 1 if oscillator on via LButton
 int menuPos=0;      // used so returns to previous menu position when re-entering the menu
@@ -102,6 +107,7 @@ int menuLevel=0, menuLevel2=0;   // determines if encoder moves between menu ite
 int menuVal=0, menuVal2=99, menuMax=9, menuMin=0;
 
 int mode=0;         // 0=SWR/R; 1=V1/V2; 2=Scan ; 3=Power; 4=Power Calibration point 1; 5=Power Calibration Point 2
+int pDisplay=1;      // select display type when in power mode
 int presetNo=1;      // selected preset for scan limits
 
 // PROGMEM const char *menu_item[]={menu_00, menu_01, menu_02};
@@ -113,19 +119,19 @@ int_fast32_t ADC1, ADC2, ADC3, ADC4;    //  values read from Analog inputs relat
 float R, X;              //  calculated resistance and reactance of load
 float SWR;               //  calculated SWR of load against 50R
 float dBm;               //  Calculated power in dBm, corrected for attenuator value
-int dBmx10;              //  dBm to 1 decimal place, *10  
+//int dBmx10;              //  dBm to 1 decimal place, *10  
 int attenuator;          //  Value of attenuator fitted * 10 in dB
 float power;             //  Calculated power in watts or milliwatts, corrected for attenuator value
+float pkPower;           //  store for peak power
+unsigned peakDelay=15000;     //  interval between peak resets (scan cycles)
 int ZeroAdjust=0;        //  offset to correct for minor errors in op amp gains and different R values - difference between ADC1 and ADC3 with no load
 int V2Adjust=0;          //  offset to correct for minor component tolerance errors - difference between ADC2 and ADC3 with 50R load
 
 void setup() {
   pinMode(R_BUTTON,INPUT); // Connect to a button that goes to GND on push
   digitalWrite(R_BUTTON,HIGH);  //  Turn on pull up resistor
-  pinMode(L_BUTTON,INPUT); // Connect to a button that goes to GND on push
-  digitalWrite(L_BUTTON,HIGH);  //  Turn on pull up resistor
-  pinMode(TEST_SWITCH,INPUT); // Connect to a button or switch that goes to GND on push.  Used to control oscillator
-  digitalWrite(TEST_SWITCH,HIGH);  //  Turn on pull up resistor
+  pinMode(M_BUTTON,INPUT); // Connect to a button that goes to GND on push
+  digitalWrite(M_BUTTON,HIGH);  //  Turn on pull up resistor
   pinMode(Vin1, INPUT);
   digitalWrite(Vin1,LOW);
   pinMode(Vin2, INPUT);
@@ -175,11 +181,6 @@ void setup() {
 void loop() {  // MAIN LOOP  **********************************************************************************
 
   byte commandChar=0;             //  received character
-  LButtonState1=LButtonState;   // store state of buttons last time round the loop
-  buttonState1=buttonState;
-  buttonState = digitalRead(R_BUTTON);
-  LButtonState = digitalRead(L_BUTTON);
-//  testSwitchState = digitalRead(TEST_SWITCH);
   
     //  test if the oscillator is to be on or off
   oscOn=((testOn)||(scanning)||(serialOn))&&(!inMenu);
@@ -197,6 +198,38 @@ void loop() {  // MAIN LOOP  ***************************************************
         n=0;                         // reset the counter to delay send of data for a time after a change
   }
 
+  if ((mButtonShort) || (rButtonShort)) delay(100);    // debounce short button presses
+  
+  // test the Menu button, and set flags if pressed for long or short for one scan
+  mButtonPress1=mButtonPress;   // store state of buttons and flags last time round the loop
+  rButtonPress1=rButtonPress;
+  //mButtonLongMem=mButtonLong;
+  //rButtonLongMem=rButtonLong;
+  rButtonPress = !(digitalRead(R_BUTTON));    // NO Button
+  mButtonPress = digitalRead(M_BUTTON);       // NC button
+  
+  // test menu button
+  if (mButtonPress) {    // NC button, so goes high if pressed
+    mButtonCount++;
+    delay(100);
+  }
+  else {
+    mButtonCount=0;
+  }
+  mButtonShort = (!mButtonPress && mButtonPress1 && (mButtonCount<20)); // True if Button was pressed last time, but count for long button not reached
+  mButtonLong = (mButtonCount == 20);  // True for one scan round loop when mButtonCount = 20
+
+  // test rotary encoder button
+  if (rButtonPress) {    // NO button, so goes low if pressed
+    rButtonCount++;
+    delay(100);
+  }
+  else {
+    rButtonCount=0;
+  }
+  rButtonShort = (!rButtonPress && rButtonPress1 && (rButtonCount<20)); // True if Button not pressed, was pressed last time, but count for long button not reached
+  rButtonLong = (rButtonCount== 20);  // True for one scan round loop when mButtonCount  = 20
+  
   if (inMenu) {
       // reset scanning flags
       scanning=0;  
@@ -211,9 +244,9 @@ void loop() {  // MAIN LOOP  ***************************************************
         menuVal2=menuVal;
       }
 
-      //  press or encoder button changes from changing menu (line 0) to changing value (line 1)
-      if(buttonState == LOW) {
-            Serial.println("menu RButton Press");
+      //  press of encoder button changes from changing menu (line 0) to changing value (line 1)
+      if(rButtonShort) {
+            //Serial.println("menu RButton Press");
             if (menuLevel) {
                 menuLevel=0;
                 if (menuPos==5) { // Preset changed
@@ -225,67 +258,55 @@ void loop() {  // MAIN LOOP  ***************************************************
             }
             else { menuLevel=1;};
             showMenu();
-            delay(250);
       };
     
-      if((LButtonState==HIGH)&&(LButtonState1==LOW)) {    // NC button!  Only change on edge
-        //  Exit Menu
+      if (mButtonLong) {    
+      //  Exit Menu
             inMenu=0;
             showDDSFreq();
             //  save the zeroadjust and preset values in case they have changed
-            Serial.print("Saving values on menu exit");
+            //Serial.print("Saving values on menu exit");
             storeZeroAdjust();
             storePresets();
             storeCalPoints();
             store16bits(200,attenuator);
 
-            while (digitalRead(L_BUTTON)==HIGH) {  // wait until button released
-            }
-            delay(250);  // debounce
-            LButtonState=LOW;
+//            while (digitalRead(L_BUTTON)==HIGH) {  // wait until button released
+//            }
+//            delay(250);  // debounce
+//            LButtonState=LOW;
       }
-      else {
-            LButtonCount=0;
-      };
-          
   }
   else {    // not in menu
-      if(buttonState == LOW) {
+      if(rButtonShort) {
+        if (mode<2) {
             setincrement();        
+        }
       };
     
-      //  use counter to determine if button pressed for long time or not
-      if(LButtonState==HIGH) {      // NC button
-            LButtonCount++;
-            delay(100);
-            if(LButtonCount>20) {    // pressed for 2 sec so enter menu
-            //  Enter Menu
-            //  Rotary Encoder now changes the menu selection until the encoder button is pressed
-            //  pressing the L_BUTTON again exists the menu
-                storeMEM();  // save to memory in case < 2 secs have elapsed since it was changed
-                inMenu=1;
-                menuLevel=0;
-                showMenu();
-                testOn=0;
-                //  loop until button has been released
-                while (digitalRead(L_BUTTON)==HIGH) {
-                }
-                delay(250);
-            }
-      } else {  // LButtonSate is LOW - button not pressed
-            if ((LButtonState1==HIGH) && (!inMenu)) {  //  Button released before menu entered
-              if ((mode==0)||(mode==1)) {                //  SWR or ADC modes
-                testOn=!testOn;                      // toggle the oscillator
-              }
-              else if (mode==4) {                      //  Power cal point 1
-                saveCalPoint(1);
-              }
-              else if (mode==5) {                      //  Power cal point 2
-                saveCalPoint(2);
-              }
-            }  
-            LButtonCount=0;
+      if (mButtonLong) {
+          //  Enter Menu
+          //  Rotary Encoder now changes the menu selection until the encoder button is pressed
+          //  pressing the M_BUTTON again exists the menu
+          storeMEM();  // save to memory in case < 2 secs have elapsed since it was changed
+          inMenu=1;
+          menuLevel=0;
+          showMenu();
+          testOn=0;
       }
+      
+      if (mButtonShort) {  //  Short Menu Button press
+        if ((mode==0)||(mode==1)) {                //  SWR or ADC modes
+          testOn=!testOn;                      // toggle the oscillator
+        }
+        else if (mode==4) {                      //  Power cal point 1
+          saveCalPoint(1);
+        }
+        else if (mode==5) {                      //  Power cal point 2
+          saveCalPoint(2);
+        }
+      }  
+         
       
         // Write the frequency to memory if not stored and 2 seconds have passed since the last frequency change.
       if(memstatus == 0){   
@@ -294,7 +315,7 @@ void loop() {  // MAIN LOOP  ***************************************************
 
       
       // write the V1 and V2 values to LCD, but only every so many scans and only if not in the menus
-      if (n>15000) {
+      if ((n>15000)||(mode==3)) {
           ADC1 = analogRead(Vin1);
           ADC2 = analogRead(Vin2);
           ADC3 = analogRead(Vin3);
@@ -373,11 +394,37 @@ void loop() {  // MAIN LOOP  ***************************************************
     // read the char
     commandChar = Serial.read();
     switch(commandChar) {
+      case 'A':    // set up cal point 1 ADC value - usually higher power than point 2
+          //  Parameter passed in is dBm value (into port, so eg 27dBm transmitter, 40db attenuator, -13dBm to port)
+          powerCalPoints[0][0]=Serial.parseFloat();
+          ADC4 = analogRead(Vin4);
+          powerCalPoints[0][1]=ADC4;
+          //  Echo back the results
+          Serial.print("A ");
+          Serial.print(powerCalPoints[0][0]);
+          Serial.print(", ");
+          Serial.println(powerCalPoints[0][1]);
+          storeCalPoints();
+          break;
+      case 'B':    // set up cal point 2 ADC value - usually lower power than point 2
+          powerCalPoints[1][0]=Serial.parseFloat();
+          ADC4 = analogRead(Vin4);
+          powerCalPoints[1][1]=ADC4;
+          //  Echo back the results
+          Serial.print("B ");
+          Serial.print(powerCalPoints[1][0]);
+          Serial.print(", ");
+          Serial.println(powerCalPoints[1][1]);
+          storeCalPoints();
+          break;
+      case 'C':
+          V2Adjust=Serial.parseFloat();
+          break;
+      case 'D':    // 
+          printPowerCalPoints();
+          break;
       case 'F':
           rx=Serial.parseFloat();
-          break;
-      case 'L':
-          startF=Serial.parseFloat();
           break;
       case 'H':
           endF=Serial.parseFloat();
@@ -385,14 +432,8 @@ void loop() {  // MAIN LOOP  ***************************************************
       case 'I':
           scanInc=Serial.parseFloat();
           break;
-      case 'C':
-          V2Adjust=Serial.parseFloat();
-          break;
-      case 'O':    // Letter O
-          ZeroAdjust=Serial.parseFloat();
-          break;
-      case 'Y':
-          if (!inMenu) serialOn=1;    //  Turn oscillator on, but only if not in the menus
+      case 'L':
+          startF=Serial.parseFloat();
           break;
       case 'M':          // Change mode
           mode=Serial.parseInt();
@@ -402,20 +443,29 @@ void loop() {  // MAIN LOOP  ***************************************************
           scanning=0;
           scanSampleCount=0;
           break;
+      case 'O':    // Letter O
+          ZeroAdjust=Serial.parseFloat();
+          break;
+      case 'P':
+          //  send all preset values to PC
+          printPresets();
+          break;
       case 'S':
           if (!inMenu) {
             scanning=1;    // start scan, but only if not in the menus
             rx=startF;
           }
           break;
+      case 'T':    // 
+          attenuator=Serial.parseFloat();
+          break;
       case 'X':
           scanning=0;    // finish scan
           scanSampleCount=0;
           Serial.println("X");
           break;
-      case 'P':
-          //  send all preset values to PC
-          printPresets();
+      case 'Y':
+          if ((!inMenu)&&(mode<3)) serialOn=1;    //  Turn oscillator on, but only if not in the menus and analyser mode
           break;
       default:
           Serial.println("serial default");
@@ -462,12 +512,19 @@ ISR(PCINT2_vect) {
         break;
       case 2:  //Scan - does nothing
         break;
-      case 3:  //Power - changes attenuator setting
+      case 3:  //Power - changes display type
+        //  pDisplay has different values:
+        //  1=ADC, dBm, Watts
+        //  2=dBm, bar graph display
+        //  3=Watts, bar graph
+        //  4=Watts (Peak)
         if (result==DIR_CW) {
-          attenuator++;
+          pDisplay++;
+          if (pDisplay>4) { pDisplay=1;};
         }
         else {
-          attenuator--;
+          pDisplay--;
+          if (pDisplay<1) {pDisplay=4;};
         }
         break;
       default:
@@ -598,8 +655,16 @@ void showPower() {
   lcd.print(dBm);
   lcd.print("dBm   ");
   lcd.setCursor(0,1);
-  lcd.print(power);
-  lcd.print("Watts     ");
+  lcdPrintInt(ADC4, 4);
+  lcd.print(" : ");
+  if (power > 2000) {
+    lcd.print(power/1000.0);
+    lcd.print("W    ");
+  }
+  else {
+    lcd.print(power);
+    lcd.print("mW   ");
+  }
 }
 
 void showCal(int point) {
@@ -747,19 +812,36 @@ void calcdBm() {
   // routine to calculate measdured power in dBm based on ADC4 value, calibration points and attenuator
   // dBm*10 = (Dc1-Dc2)*(Vx-Vc2)/(Vc1-Vc2) + Dc2
   // For V substitute ADC4 values for the relevant points, conversion to V cancels out
-  float intdBm;
+  float intdBmx10;
   float slope;
-  
-  slope=(powerCalPoints[0][0]-powerCalPoints[1][0])/(powerCalPoints[0][1]-powerCalPoints[1][1]);
-  intdBm = slope*(ADC4-powerCalPoints[1][1])+powerCalPoints[1][0];
-  dBm=(intdBm + attenuator)/10.0;
-  dBmx10=intdBm + attenuator;      //  May need to do some casting of variables
+  //printPowerCalPoints();
+  slope=float(powerCalPoints[0][0]-powerCalPoints[1][0])/float(powerCalPoints[0][1]-powerCalPoints[1][1]);
+  //Serial.print ("Slope: ");
+  //Serial.print (slope);
+  intdBmx10 = slope*float(ADC4-powerCalPoints[1][1])+float(powerCalPoints[1][0]);
+  //Serial.print (", intdBmx10: ");
+  //Serial.print (intdBmx10);
+  dBm=(intdBmx10 + float(attenuator))/10.0;
+  //dBmx10=int(dBm/10.0);      //  May need to do some casting of variables
+  //Serial.print (", dBmx10: ");
+  //Serial.println (dBmx10);
 }
+
+void printPowerCalPoints() {
+  Serial.print ("D1: ");
+  Serial.print(powerCalPoints[0][0]);
+  Serial.print (" D2: ");
+  Serial.print(powerCalPoints[1][0]);
+  Serial.print (" V1: ");
+  Serial.print(powerCalPoints[0][1]);
+  Serial.print (" V2: ");
+  Serial.println(powerCalPoints[1][1]);
+}  
 
 void calcWatts() {
   // routine to calculate the power in watts or milliwatts (maybe even microwatts)
   
-  power=pow(10,dBm/10.0);
+  power=pow(10.0,dBm/10.0);
 }
 
 void storeMEM(){
@@ -799,7 +881,7 @@ void readCalPoints() {
   powerCalPoints[0][0] = read16bits(202);
   powerCalPoints[1][0] = read16bits(204);
   powerCalPoints[0][1] = read16bits(206);
-  powerCalPoints[1][1] = read16bits(207);
+  powerCalPoints[1][1] = read16bits(208);
 }
 
 void printPresets() {
@@ -867,8 +949,8 @@ void store16bits(int addr, int value){
    
       EEPROM.write(addr,lowByte(value));
       EEPROM.write(addr+1,highByte(value));
-    Serial.print("store16: ");
-    Serial.println(value);
+    //Serial.print("store16: ");
+    //Serial.println(value);
 }
 
 
@@ -891,8 +973,8 @@ int read16bits(int addr) {
   
     b = EEPROM.read(addr+1);
     readValue = (b << 8) + EEPROM.read(addr);
-    Serial.print("Read16: ");
-    Serial.println(readValue);
+    //Serial.print("Read16: ");
+    //Serial.println(readValue);
     return readValue;  
 }
 
@@ -1017,6 +1099,8 @@ void showMenu() {
        lcd.print("            ");
        lcd.setCursor(0,1);
        lcdPrintIntAsDecimal(powerCalPoints[0][0],5,1);
+       lcd.print(", ");
+       lcdPrintInt(powerCalPoints[0][1],4);
        break;       
      case 8:
        lcd.print("Pcal 2 dBm * 10:");
@@ -1034,6 +1118,8 @@ void showMenu() {
        lcd.print("            ");
        lcd.setCursor(0,1);
        lcdPrintIntAsDecimal(powerCalPoints[1][0],5,1);
+       lcd.print(", ");
+       lcdPrintInt(powerCalPoints[1][1],4);
        break;       
      default:
        break;
