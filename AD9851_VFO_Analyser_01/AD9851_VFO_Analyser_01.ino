@@ -2,9 +2,28 @@
 Code by David Wilde M0WID
 Original VFO code by Richard Visokey AD7C - www.ad7c.com
 Rotary library also by someone else.
-Revision 0.02 - December 30th, 2013
 
-Some values are stored in EEPROM:
+//**  The code for the bar graph was copied from  TF3LJ website
+//**  It relies on a direct swipe from the AVRLIB lcd.c/h.
+//**            Therefore see the AVRLIB copyright notice.
+//** 
+//**  TF3LJ states:  The essentials for bargraph display have been copied and improved/adapted to
+//**  my own taste, including several different customized bargraph display styles.
+//**
+//**  Peak Bar (sticky bar) indicator added as an option.
+//**
+//**  Initial version.: 2009-09-08, Loftur Jonasson, TF3LJ
+//**
+//**  Last update to this file: 2013-09-13, Loftur Jonasson, TF3LJ / VE2LJX
+
+
+Revision 0.03 - March 1st, 2014
+ToDo:
+    Split out some functions to a lib (bargraph, dds control, dB calcs)
+
+
+
+Some values are stored in EEPROM:  ToDo - make this a complex data type so self documenting
 
 Freq 0-6 - could be improved!
 Zero Adjust 7,8
@@ -38,6 +57,22 @@ powerCalPoints 202-217
 #define pulseHigh(pin) {digitalWrite(pin, HIGH); digitalWrite(pin, LOW); }
 #define F_MAX 30000000  // Max frequency limit
 #define F_MIN 1000000   // Min Frequency limit
+#define PEP_BUFFER 100  // Size of PEP buffer.  Determines decay time for PEP values, based on loop scan time
+
+// progress bar defines
+#define PROGRESSPIXELS_PER_CHAR	6
+
+// custom LCD characters for bargraph
+const uint8_t __attribute__ ((progmem)) LcdCustomChar[][8] = {
+	{0x00, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00, 0x00}, // 0. 0/5 full progress block
+	{0x00, 0x10, 0x10, 0x15, 0x10, 0x10, 0x00, 0x00}, // 1. 1/5 full progress block
+	{0x00, 0x18, 0x18, 0x1d, 0x18, 0x18, 0x00, 0x00}, // 2. 2/5 full progress block
+	{0x00, 0x1c, 0x1c, 0x1d, 0x1C, 0x1c, 0x00, 0x00}, // 3. 3/5 full progress block
+	{0x00, 0x1e, 0x1e, 0x1E, 0x1E, 0x1e, 0x00, 0x00}, // 4. 4/5 full progress block
+	{0x00, 0x1f, 0x1f, 0x1F, 0x1F, 0x1f, 0x00, 0x00}, // 5. 5/5 full progress block
+	{0x06, 0x06, 0x06, 0x16, 0x06, 0x06, 0x06, 0x06} // 6. Peak Bar
+};
+
 Rotary r = Rotary(2,3); // sets the pins the rotary encoder uses.  Must be interrupt pins.
 
 LiquidCrystal_I2C lcd(0x27, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);
@@ -122,8 +157,9 @@ float dBm;               //  Calculated power in dBm, corrected for attenuator v
 //int dBmx10;              //  dBm to 1 decimal place, *10  
 int attenuator;          //  Value of attenuator fitted * 10 in dB
 float power;             //  Calculated power in watts or milliwatts, corrected for attenuator value
-float pkPower;           //  store for peak power
-unsigned peakDelay=15000;     //  interval between peak resets (scan cycles)
+int16_t pep_dBm;
+float pepPower;           //  store for peak power
+//unsigned peakDelay=15000;     //  interval between peak resets (scan cycles)
 int ZeroAdjust=0;        //  offset to correct for minor errors in op amp gains and different R values - difference between ADC1 and ADC3 with no load
 int V2Adjust=0;          //  offset to correct for minor component tolerance errors - difference between ADC2 and ADC3 with 50R load
 
@@ -152,9 +188,14 @@ void setup() {
   }
   
   lcd.begin(16, 2);            // 1602 LCD display
+  //  send down custom chars for bargraph to the display
+  lcd_bargraph_init();
+  
   PCICR |= (1 << PCIE2);
   PCMSK2 |= (1 << PCINT18) | (1 << PCINT19);
   sei();                       // Enable interrupts
+  
+  // set up the ports for the AD9850/1
   pinMode(FQ_UD, OUTPUT);
   pinMode(W_CLK, OUTPUT);
   pinMode(DATA, OUTPUT);
@@ -162,8 +203,9 @@ void setup() {
   pulseHigh(RESET);
   pulseHigh(W_CLK);
   pulseHigh(FQ_UD);  // this pulse enables serial mode on the AD9850/51 - Datasheet page 12.
-  lcd.setCursor(hertzPosition,0);    
-   // Load the stored frequency  
+  lcd.setCursor(hertzPosition,0);   
+  
+  // Load the stored frequency  
   if (ForceFreq == 0) {
     Serial.println("Reading EEPROM");
     freq = String(EEPROM.read(0))+String(EEPROM.read(1))+String(EEPROM.read(2))+String(EEPROM.read(3))+String(EEPROM.read(4))+String(EEPROM.read(5))+String(EEPROM.read(6));
@@ -283,7 +325,17 @@ void loop() {  // MAIN LOOP  ***************************************************
             setincrement();        
         }
       };
-    
+
+      if (rButtonLong) {
+        if (mode==4) {                      //  Power cal point 1
+          saveCalPoint(1);
+        }
+        else if (mode==5) {                      //  Power cal point 2
+          saveCalPoint(2);
+        }
+      }  
+
+   
       if (mButtonLong) {
           //  Enter Menu
           //  Rotary Encoder now changes the menu selection until the encoder button is pressed
@@ -299,13 +351,7 @@ void loop() {  // MAIN LOOP  ***************************************************
         if ((mode==0)||(mode==1)) {                //  SWR or ADC modes
           testOn=!testOn;                      // toggle the oscillator
         }
-        else if (mode==4) {                      //  Power cal point 1
-          saveCalPoint(1);
-        }
-        else if (mode==5) {                      //  Power cal point 2
-          saveCalPoint(2);
-        }
-      }  
+      }
          
       
         // Write the frequency to memory if not stored and 2 seconds have passed since the last frequency change.
@@ -345,15 +391,15 @@ void loop() {  // MAIN LOOP  ***************************************************
               showPower();
               break;
             case 4:  // Power calibration point 1
-              // Display dBm value and allow it to be changed with rotary coder
+              // ToDo: Display dBm value and allow it to be changed with rotary coder
               // Display ADC4
-              // Short press of menu button stores the value
+              // Long press of encoder button stores the value
               showCal(1);
               break;       
             case 5:  // Power calibration point 2
-              // Display dBm value and allow it to be changed with rotary coder
+              // Todo: Display dBm value and allow it to be changed with rotary coder
               // Display ADC4
-              // Short press of menu button stores the value
+              // Long press of encoder button stores the value
               showCal(2);
               break;       
             default:
@@ -402,7 +448,7 @@ void loop() {  // MAIN LOOP  ***************************************************
           //  Echo back the results
           Serial.print("A ");
           Serial.print(powerCalPoints[0][0]);
-          Serial.print(", ");
+         printDelim();
           Serial.println(powerCalPoints[0][1]);
           storeCalPoints();
           break;
@@ -413,7 +459,7 @@ void loop() {  // MAIN LOOP  ***************************************************
           //  Echo back the results
           Serial.print("B ");
           Serial.print(powerCalPoints[1][0]);
-          Serial.print(", ");
+          printDelim();
           Serial.println(powerCalPoints[1][1]);
           storeCalPoints();
           break;
@@ -534,6 +580,92 @@ ISR(PCINT2_vect) {
   }
 }
 
+
+
+
+
+//-----------------------------------------------------------------------------------------
+// Initialize LCD for bargraph display - Load 6 custom bargraph symbols
+//-----------------------------------------------------------------------------------------
+void lcd_bargraph_init(void)
+{
+
+	for (uint8_t i=0; i<7; i++)
+	{
+		lcd.createChar(i,(uint8_t*)LcdCustomChar[i]);
+	}
+}
+
+//-----------------------------------------------------------------------------------------
+// Display Bargraph - including Peak Bar, if relevant
+//
+// "length" indicates length of bargraph in characters 
+// (max 16 on a 16x2 display or max 20 on a 20x4 display)
+//
+// (each character consists of 6 bars, thereof only 5 visible)
+//
+// "maxprogress" indicates full scale (16 bit unsigned integer)
+//
+// "progress" shown as a proportion of "maxprogress"  (16 bit unsigned integer)
+//
+// if "prog_peak" (16 bit unsigned integer) is larger than "progress",
+// then Peak Bar is shown in the middle of that character position
+//-----------------------------------------------------------------------------------------
+void lcdProgressBarPeak(uint16_t progress, uint16_t prog_peak, uint16_t maxprogress, uint8_t length)
+{
+	uint8_t i;
+	uint16_t pixelprogress;
+	uint8_t c;
+
+	if (progress >= maxprogress) progress = maxprogress;	// Clamp the upper bound to prevent funky readings
+
+	// draw a progress bar displaying (progress / maxprogress)
+	// starting from the current cursor position
+	// with a total length of "length" characters
+	// ***note, LCD chars 0-6 must be programmed as the bar characters
+	// char 0 = empty ... char 5 = full, char 6 = peak bar - disabled if maxprogress set as 0 (or lower than progress)
+
+	// total pixel length of bargraph equals length*PROGRESSPIXELS_PER_CHAR;
+	// pixel length of bar itself is
+	pixelprogress = ((uint32_t)progress*(length*PROGRESSPIXELS_PER_CHAR)/maxprogress);
+		
+	// print exactly "length" characters
+	for(i=0; i<length; i++)
+	{
+		// check if this is a full block, or partial or empty
+		if( ((i*PROGRESSPIXELS_PER_CHAR)+PROGRESSPIXELS_PER_CHAR) > pixelprogress )
+		{
+			// this is a partial or empty block
+			if( ((i*PROGRESSPIXELS_PER_CHAR)) > pixelprogress )
+			{
+				// If an otherwise empty block contains previous "Peak", then print peak char
+				// If this function is not desired, simply set prog_peak at 0 (or as equal to progress)
+				if(i == ((uint32_t)length * prog_peak)/maxprogress)
+					c = 6;				
+				// othwerwise this is an empty block
+				// use space character?
+				else
+					c = 0;
+			}
+			else
+			{
+				// this is a partial block
+				c = pixelprogress % PROGRESSPIXELS_PER_CHAR;
+			}
+		}
+		else
+		{
+			// this is a full block
+			c = 5;
+		}
+		
+		// write character to display
+		lcd.write(c);
+	}
+}
+
+
+
 int_fast32_t checkFreq(int_fast32_t fc) {
   // if out of bounds then revert to previous frequency value
   if (fc >F_MAX){fc=F_MAX;}; // UPPER VFO LIMIT
@@ -629,8 +761,7 @@ void lcdPrintIntAsDecimal(int i, int charNum, int decimalPos) {
 
 void showSWR() {
   if (oscOn) { 
-    R=calcR();
-    X=calcX();
+    calcRX();
     if (R>=50.0) {SWR=R/50.0;} else {SWR=50.0/R;};
     if (SWR > 99.0) SWR=99.9;  // limit to avoid display going wrong
     if (SWR<10.00) lcd.print(" ");
@@ -647,25 +778,85 @@ void showSWR() {
   }
 }
 
+/* #############################################################################
+
+Show Power
+
+Also calculates PEP power
+
+################################################################################*/
+
 void showPower() {
+  static uint16_t a=0;  // ring buffer counter
+  static int16_t db_buff[PEP_BUFFER];
+  int16_t dMax=-32767;   // set max to low value at start
+  
   calcdBm();
-  calcWatts();
+  db_buff[a]=100*dBm;
+  a++;
+  if (a > 99) a=0;
+  
+  power = calcWatts(dBm);
+  // store the power value into buffer used to calculate PEP values
+  
+  //   find max value in the buffer
+  for (uint16_t x=0; x<PEP_BUFFER;x++) {
+    dMax = max(dMax, db_buff[x]);
+  }
+  pepPower=calcWatts(float(dMax/100));
+  
   lcd.setCursor(0,0);
   lcd.print("Power: ");
   lcd.print(dBm);
   lcd.print("dBm   ");
   lcd.setCursor(0,1);
-  lcdPrintInt(ADC4, 4);
-  lcd.print(" : ");
-  if (power > 2000) {
-    lcd.print(power/1000.0);
-    lcd.print("W    ");
-  }
-  else {
-    lcd.print(power);
-    lcd.print("mW   ");
+  //  pDisplay has different values to select what is displayed on the second line:
+  //  1=dBm on first line, ADC, Watts on second
+  //  2=dBm, bar graph 0-5W display on second
+  //  3=dBm bar graph 0-100W
+  //  4=Watts (Peak)
+  switch (pDisplay) {
+    case 1:
+      lcdPrintInt(ADC4, 4);
+      lcd.print(" : ");
+      if (power > 2000) {
+        lcd.print(power/1000.0);
+        lcd.print("W    ");
+      }
+      else {
+        lcd.print(power);
+        lcd.print("mW   ");
+      }
+      break;
+    case 2:
+      lcdProgressBarPeak(uint16_t(power),uint16_t(pepPower), 5000,16);
+      break;
+    case 3:
+      lcdProgressBarPeak(uint16_t(power/1000),uint16_t(pepPower/1000),100,16);
+      break;
+    case 4:
+      if (power > 2000) {
+        lcd.print(power/1000.0);
+        lcd.print("W  Pk: ");
+      }
+      else {
+        lcd.print(power);
+        lcd.print("mW Pk: ");
+      }
+      if (pepPower > 2000) {
+        lcd.print(pepPower/1000.0);
+        lcd.print("W ");
+      }
+      else {
+        lcd.print(pepPower);
+        lcd.print("mW ");
+      }
+      break;
+    default:
+      break;
   }
 }
+
 
 void showCal(int point) {
   //  Display the values for the selected power calibration point
@@ -732,81 +923,83 @@ void showFreq(int lcdCol, int lcdRow, int_fast32_t f){
 void printFreq() {
         Serial.print("D ");
         Serial.print(rx);
-        Serial.print(" ");
+        printDelim();
         Serial.print(ADC1);
-        Serial.print(" ");
+        printDelim();
         Serial.print(ADC2);
-        Serial.print(" ");
+        printDelim();
         Serial.print(ADC3);
-        Serial.print(" ");
+        printDelim();
         Serial.println(ADC4);
 }
 
-float calcR() {
-//  Calculate the resistance of the load from the input voltage(V1) and bridge voltage (V3)
-//  V2 is the voltage across the load.  ADC1 and ADC3 are the raw values from the A-D convertor
-//  We need to be careful to avoid overflows as V3 approaches V1 in value, when the load is far from 50R
-//  Also we measure RMS value of V3 so cannot determine if it is -ve, so cannot determine if Rx is > or < 50R
-//
-//  Formula Rx = 50/(V1/(V3+V1/2)-1)
-//  And just add a value to the ADC reading to compensate
+void printDelim() {
+  Serial.print(", ");
+}
 
-float tempR;
+
+void calcRX() {
+//  Calculate the resistance and reactance of the load from the input voltage(V1) and current voltage (V2)
+//  V3 is the voltage across the load.  ADC1. ADC2 and ADC3 are the raw values from the A-D convertor
+//  We need to be careful to avoid overflows as V3 approaches V1 in value, when the load is far from 50R
+//  Also we measure RMS values of so cannot determine if it is -ve, so cannot determine sign of reactance X
+//
+
+float vR;
 float diff;
 float t1;
-unsigned long adc1_2, adc2_2, adc3_2, vDiff;
+float adc1_2, adc2_2, adc3_2, vDiff;
  
+ 
+//  Assume V1 is reading accurately, and correct ADC2 and 3 accordingly
+//  Correction values from calibration spreadsheet and optimised for 50R load
+//  Need to test if valid for other conditions
+//  
+float corrADC2;
 float corrADC3;
-int ZA;
 
-corrADC3=16.29+0.1605*ADC3;
-ZA=corrADC3;
+corrADC2=(rx/-1000000.0+30.0+float(ADC2));
+corrADC3 = ADC3-ZeroAdjust;
 
-//corrADC1=ADC1+0.2;
-//corrADC3=ADC3+21.0*sqrt(ADC3)-0.5*ADC3;
-  if (ADC1=1023) {       //  Overflow, open circuit load
-    return 999.9;
+  if (ADC1==1023) {       //  Overflow, open circuit load
+    R = 999.9;
+    X = 0;
   }
-  else if (ADC2<20) {    //  low current - very high resistance or open circuit
-    return 999.9;
+  else if (corrADC2<10) {    //  low current - very high resistance or open circuit
+    R = 999.9;
+    X = 0;
   }
-  else if (ADC3<20) {    //   low output voltage, short circuit or very low R
-    return 0.0;
+  else if (corrADC3<10) {    //   low output voltage, short circuit or very low R
+    R = 0;
+    X = 0;
   }
   else {             //   Calculate R
     //  Vr = (V1^2-V2^2-V3^2)/2*V2
     //  I = V2/51
     //  R = Vr/I = 51*(V1^2-V2^2-V3^2)/2*V2^2 = 25.5*(ADC1*ADC1-ADC2*ADC2-ADC3*ADC3)/(ADC2*ADC2)
-    if (ADC1 > ADC2+ADC3) {
+    if (ADC1 > corrADC2+corrADC3) {
       // Impossible - assume pure resistance and calculate based on ADC3/ADC1
-      t1 = ADC1/(ADC1/2+ADC3);
-      tempR = 51.0/(t1-1.0);
+      t1 = float(ADC1)/(float(ADC1)/2.0+float(corrADC3));
+      R = 51.0/(t1-1.0);
+      X=0;
     }
     else {
       adc1_2 = ADC1*ADC1;
-      adc2_2 = ADC2*ADC2;
-      adc3_2 = ADC3*ADC3;
+      adc2_2 = corrADC2*corrADC2;
+      adc3_2 = corrADC3*corrADC3;
       vDiff = adc1_2-adc2_2-adc3_2;
-      tempR = 25.5*(vDiff)/adc2_2;
-      Serial.println(adc1_2);
-      Serial.println(adc2_2);
-      Serial.println(adc3_2);
+      vR = vDiff/2*corrADC2;
+      R = 25.5*float(vDiff)/float(adc2_2);
+      X = sqrt(float(adc3_2)-vR*vR)*51/float(corrADC2);
+      Serial.print("ADC1:");
+      Serial.print(ADC1); printDelim(); Serial.println(adc1_2);
+      Serial.print(ADC2); printDelim(); Serial.print(corrADC2); printDelim(); Serial.println(adc2_2);
+      Serial.print(ADC3); printDelim(); Serial.print(corrADC3); printDelim(); Serial.println(adc3_2);
       Serial.println(vDiff);
     }
-    return tempR;
   }
 }
 
-float calcX() {
- //  Calculate the reactance.
- //  We measure overall voltage, voltage across antenna and voltage across R, leading to a vector diagram.
- //  If perfect zero reactance, then ADC1=ADC2+ADC3.
- //  If reactance exists then ADC1>ADC2+ADC3, but we cannot determine the sign with this design
- float X;
- float R;
- X=0;
- return X;
-} 
 
 void calcdBm() {
   // routine to calculate measdured power in dBm based on ADC4 value, calibration points and attenuator
@@ -827,6 +1020,7 @@ void calcdBm() {
   //Serial.println (dBmx10);
 }
 
+
 void printPowerCalPoints() {
   Serial.print ("D1: ");
   Serial.print(powerCalPoints[0][0]);
@@ -838,11 +1032,14 @@ void printPowerCalPoints() {
   Serial.println(powerCalPoints[1][1]);
 }  
 
-void calcWatts() {
+float calcWatts(float d) {
   // routine to calculate the power in watts or milliwatts (maybe even microwatts)
   
-  power=pow(10.0,dBm/10.0);
+   return pow(10.0,d/10.0);
+  
 }
+
+
 
 void storeMEM(){
   //Write each frequency section to a EPROM slot.  Yes, it's cheating but it works!
